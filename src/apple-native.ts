@@ -4,6 +4,11 @@ import path from "node:path";
 
 import { Effect } from "effect";
 
+import {
+  decodeProviderExecutionAttestation,
+  providerAttestationSummary,
+  verifyAppleNativeAttestation,
+} from "./attestation.js";
 import { DRONE_PROTOCOL_VERSION } from "./domain.js";
 import type {
   NativeDriverRequest,
@@ -27,6 +32,8 @@ export interface AppleNativeOptions {
   readonly initfsPath: string;
   readonly stateRoot: string;
   readonly runsRoot: string;
+  readonly attestationFile: string;
+  readonly attestationPublicKey: string;
   readonly platform?: NodeJS.Platform;
   readonly architecture?: string;
 }
@@ -39,6 +46,7 @@ interface NativeSuccess {
   readonly duration_ms: number;
   readonly stdout_base64: string;
   readonly stderr_base64: string;
+  readonly attestation: unknown;
   readonly outputs: ReadonlyArray<{
     readonly name: string;
     readonly host_path: string;
@@ -93,6 +101,8 @@ export function buildNativeDriverRequest(
   return {
     protocol_version: DRONE_PROTOCOL_VERSION,
     container_id: nativeContainerId(execution.job_id),
+    provider_attestation_id: execution.provider_attestation_id,
+    attestation_challenge: execution.attestation_challenge,
     image_reference: execution.operation.image,
     image_store_root: path.resolve(options.stateRoot),
     kernel_path: path.resolve(options.kernelPath),
@@ -144,6 +154,7 @@ function decodeSuccess(value: unknown): NativeSuccess {
     !integer(response.duration_ms, 0, Number.MAX_SAFE_INTEGER) ||
     typeof response.stdout_base64 !== "string" ||
     typeof response.stderr_base64 !== "string" ||
+    response.attestation === undefined ||
     !Array.isArray(response.outputs)
   ) {
     throw providerFailed("Invalid driver response.");
@@ -217,6 +228,8 @@ export class AppleNativeProvider implements SandboxProvider {
       initfsPath: path.resolve(options.initfsPath),
       stateRoot: path.resolve(options.stateRoot),
       runsRoot: path.resolve(options.runsRoot),
+      attestationFile: path.resolve(options.attestationFile),
+      attestationPublicKey: path.resolve(options.attestationPublicKey),
     };
   }
 
@@ -230,6 +243,21 @@ export class AppleNativeProvider implements SandboxProvider {
     const state = supportedHost && (await directory(this.#options.stateRoot));
     const installed = supportedHost && driver && kernel && initfs && state;
     const enabled = this.#options.enabled && installed;
+    let attestation;
+    if (enabled) {
+      try {
+        attestation = await verifyAppleNativeAttestation({
+          driverPath: this.#options.driverPath,
+          kernelPath: this.#options.kernelPath,
+          initfsPath: this.#options.initfsPath,
+          attestationFile: this.#options.attestationFile,
+          publicKeyFile: this.#options.attestationPublicKey,
+        });
+      } catch {
+        attestation = undefined;
+      }
+    }
+    const attested = attestation !== undefined;
     const reason = !supportedHost
       ? "unsupported_host"
       : !driver
@@ -242,13 +270,19 @@ export class AppleNativeProvider implements SandboxProvider {
               ? "image_store_not_provisioned"
               : !this.#options.enabled
                 ? "disabled_by_configuration"
-                : "ready";
+                : !attested
+                  ? "attestation_missing_invalid_or_expired"
+                  : "ready";
     return {
       provider_id: "apple_native",
       product: "Apple Containerization",
       installed,
       enabled,
-      mutations_available: enabled,
+      mutations_available: enabled && attested,
+      attested,
+      ...(attestation === undefined
+        ? {}
+        : { attestation: providerAttestationSummary(attestation) }),
       reason,
       isolation: "lightweight_vm",
       guest_os: ["linux"],
@@ -292,71 +326,98 @@ export class AppleNativeProvider implements SandboxProvider {
     execution: ProviderExecution,
     runRoot: string,
   ): Effect.Effect<ProviderExecutionResult, DroneError> {
-    const request = buildNativeDriverRequest(execution, this.#options, runRoot);
     return Effect.tryPromise({
       try: async () => {
-        const inputDirectory = path.join(runRoot, "inputs");
-        await mkdir(inputDirectory, { mode: 0o700 });
-        for (const input of execution.inputs) {
-          const destination = path.join(inputDirectory, input.slot.name);
-          await writeFile(destination, input.bytes, { flag: "wx", mode: 0o400 });
+        const current = await verifyAppleNativeAttestation({
+          driverPath: this.#options.driverPath,
+          kernelPath: this.#options.kernelPath,
+          initfsPath: this.#options.initfsPath,
+          attestationFile: this.#options.attestationFile,
+          publicKeyFile: this.#options.attestationPublicKey,
+        });
+        if (current.attestation_id !== execution.provider_attestation_id) {
+          throw providerFailed("Provider attestation changed after job admission.");
         }
-        // The native driver inherently consumes paths. Keep its inputs in a unique 0700 run root,
-        // remove directory write permission after publication, and retain them only for the scoped
-        // provider execution. The same effective UID remains the residual trust boundary.
-        await chmod(inputDirectory, 0o500);
-        await mkdir(request.work_root, { recursive: true, mode: 0o700 });
-        await mkdir(request.output_directory, { recursive: true, mode: 0o700 });
+        return buildNativeDriverRequest(execution, this.#options, runRoot);
       },
-      catch: (cause) => providerFailed("Unable to prepare the native run.", cause),
+      catch: (cause) =>
+        cause instanceof DroneError
+          ? cause
+          : providerFailed("Unable to verify native provider attestation.", cause),
     }).pipe(
-      Effect.flatMap(() =>
-        runProcess({
-          executable: this.#options.driverPath,
-          args: ["run"],
-          stdin: `${JSON.stringify(request)}\n`,
-          cwd: runRoot,
-          env: {
-            LANG: "C.UTF-8",
-            PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
-            TMPDIR: request.work_root,
-          },
-          timeoutMs: (execution.operation.resources.timeout_seconds + 60) * 1000,
-          maxOutputBytes: Math.max(512 * 1024, execution.operation.resources.max_log_bytes * 4),
-        }),
-      ),
-      Effect.flatMap((processResult) =>
+      Effect.flatMap((request) =>
         Effect.tryPromise({
           try: async () => {
-            if (processResult.exitCode !== 0) {
-              throw providerFailed("Native driver rejected or failed the sandbox job.");
+            const inputDirectory = path.join(runRoot, "inputs");
+            await mkdir(inputDirectory, { mode: 0o700 });
+            for (const input of execution.inputs) {
+              const destination = path.join(inputDirectory, input.slot.name);
+              await writeFile(destination, input.bytes, { flag: "wx", mode: 0o400 });
             }
-            let parsed: unknown;
-            try {
-              parsed = JSON.parse(processResult.stdout.toString("utf8")) as unknown;
-            } catch (cause) {
-              throw providerFailed("Native driver did not return JSON.", cause);
-            }
-            const response = decodeSuccess(parsed);
-            const maximum = execution.operation.resources.max_log_bytes;
-            return {
-              exit_code: response.exit_code,
-              timed_out: response.timed_out,
-              duration_ms: response.duration_ms,
-              stdout: decodeBase64(response.stdout_base64, maximum),
-              stderr: decodeBase64(response.stderr_base64, maximum),
-              outputs: await readOutputs(
-                response,
-                execution.operation.outputs,
-                request.output_directory,
-              ),
-            } satisfies ProviderExecutionResult;
+            // The native driver inherently consumes paths. Keep its inputs in a unique 0700 run root,
+            // remove directory write permission after publication, and retain them only for the scoped
+            // provider execution. The same effective UID remains the residual trust boundary.
+            await chmod(inputDirectory, 0o500);
+            await mkdir(request.work_root, { recursive: true, mode: 0o700 });
+            await mkdir(request.output_directory, { recursive: true, mode: 0o700 });
           },
-          catch: (cause) =>
-            cause instanceof DroneError
-              ? cause
-              : providerFailed("Unable to validate native driver output.", cause),
-        }),
+          catch: (cause) => providerFailed("Unable to prepare the native run.", cause),
+        }).pipe(
+          Effect.flatMap(() =>
+            runProcess({
+              executable: this.#options.driverPath,
+              args: ["run"],
+              stdin: `${JSON.stringify(request)}\n`,
+              cwd: runRoot,
+              env: {
+                LANG: "C.UTF-8",
+                PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+                TMPDIR: request.work_root,
+              },
+              timeoutMs: (execution.operation.resources.timeout_seconds + 60) * 1000,
+              maxOutputBytes: Math.max(512 * 1024, execution.operation.resources.max_log_bytes * 4),
+            }),
+          ),
+          Effect.flatMap((processResult) =>
+            Effect.tryPromise({
+              try: async () => {
+                if (processResult.exitCode !== 0) {
+                  throw providerFailed("Native driver rejected or failed the sandbox job.");
+                }
+                let parsed: unknown;
+                try {
+                  parsed = JSON.parse(processResult.stdout.toString("utf8")) as unknown;
+                } catch (cause) {
+                  throw providerFailed("Native driver did not return JSON.", cause);
+                }
+                const response = decodeSuccess(parsed);
+                const maximum = execution.operation.resources.max_log_bytes;
+                return {
+                  exit_code: response.exit_code,
+                  timed_out: response.timed_out,
+                  duration_ms: response.duration_ms,
+                  stdout: decodeBase64(response.stdout_base64, maximum),
+                  stderr: decodeBase64(response.stderr_base64, maximum),
+                  attestation: decodeProviderExecutionAttestation(response.attestation, {
+                    providerAttestationId: request.provider_attestation_id,
+                    challenge: request.attestation_challenge,
+                    containerId: request.container_id,
+                    imageReference: request.image_reference,
+                  }),
+                  outputs: await readOutputs(
+                    response,
+                    execution.operation.outputs,
+                    request.output_directory,
+                  ),
+                } satisfies ProviderExecutionResult;
+              },
+              catch: (cause) =>
+                cause instanceof DroneError
+                  ? cause
+                  : providerFailed("Unable to validate native driver output.", cause),
+            }),
+          ),
+        ),
       ),
     );
   }

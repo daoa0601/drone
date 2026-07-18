@@ -1,9 +1,11 @@
+import { randomBytes } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 
 import { Effect, Fiber } from "effect";
 import type { Fiber as EffectFiber } from "effect/Fiber";
 
 import { AppleNativeProvider } from "./apple-native.js";
+import { encodeExecutionAttestation } from "./attestation.js";
 import { ArtifactStore } from "./artifact-store.js";
 import type { VerifiedArtifact } from "./artifact-store.js";
 import type { DroneConfig } from "./config.js";
@@ -67,6 +69,8 @@ export class DroneService {
         initfsPath: config.appleNativeInitfs,
         stateRoot: config.appleNativeStateRoot,
         runsRoot: config.runsRoot,
+        attestationFile: config.appleNativeAttestationFile,
+        attestationPublicKey: config.appleNativeAttestationPublicKey,
       }),
     ];
     this.#providers = new Map(providers.map((provider) => [provider.providerId, provider]));
@@ -136,6 +140,20 @@ export class DroneService {
         status: 503,
       });
     }
+    if (!providerStatus.attested || providerStatus.attestation === undefined) {
+      throw new DroneError({
+        code: "SERVICE_UNAVAILABLE",
+        message: "The operation provider has no valid independent attestation.",
+        status: 503,
+      });
+    }
+    if (providerStatus.attestation.attestation_id !== input.provider_attestation_id) {
+      throw new DroneError({
+        code: "CONFLICT",
+        message: "The approved provider attestation is no longer current.",
+        status: 409,
+      });
+    }
     const declaredSlots = new Map(operation.inputs.map((slot) => [slot.name, slot]));
     for (const supplied of Object.keys(input.inputs)) {
       if (!declaredSlots.has(supplied)) {
@@ -196,13 +214,20 @@ export class DroneService {
         job_id: jobId,
         operation_id: operation.operation_id,
         provider_id: operation.provider,
+        provider_attestation_id: input.provider_attestation_id,
         status: "queued",
         inputs: input.inputs,
         outputs: [],
         submitted_at: new Date().toISOString(),
       };
       await this.jobs.create(job);
-      const execution: ProviderExecution = { job_id: jobId, operation, inputs: resolvedInputs };
+      const execution: ProviderExecution = {
+        job_id: jobId,
+        provider_attestation_id: input.provider_attestation_id,
+        attestation_challenge: randomBytes(32).toString("hex"),
+        operation,
+        inputs: resolvedInputs,
+      };
       const fiber = Effect.runFork(this.#execute(job, provider, execution)) as JobFiber;
       this.#active.set(jobId, fiber);
       started = true;
@@ -286,6 +311,19 @@ export class DroneService {
       };
       yield* effectPromise(() => jobs.write(running), "Unable to persist running job state.");
       const result = yield* provider.run(execution);
+      if (result.attestation.provider_attestation_id !== queued.provider_attestation_id) {
+        return yield* Effect.fail(
+          providerFailed("Provider execution attestation changed after admission."),
+        );
+      }
+      const executionAttestation = yield* effectPromise(
+        () =>
+          artifacts.stage(
+            encodeExecutionAttestation(result.attestation),
+            "application/vnd.drone.execution-attestation+json",
+          ),
+        "Unable to preserve the execution attestation.",
+      );
       const outputs: Array<JobOutputArtifact> = [];
       for (const output of result.outputs) {
         const metadata = yield* effectPromise(
@@ -325,6 +363,7 @@ export class DroneService {
             timed_out: result.timed_out,
             ...(stdout === undefined ? {} : { stdout_artifact_id: stdout.artifact_id }),
             ...(stderr === undefined ? {} : { stderr_artifact_id: stderr.artifact_id }),
+            execution_attestation_artifact_id: executionAttestation.artifact_id,
             ...(succeeded
               ? {}
               : { error_code: result.timed_out ? "SANDBOX_TIMEOUT" : "SANDBOX_EXIT_NONZERO" }),

@@ -40,6 +40,8 @@ public struct NativeOutputDeclaration: Codable, Sendable {
 public struct NativeRequest: Codable, Sendable {
   public let protocolVersion: String
   public let containerID: String
+  public let providerAttestationID: String
+  public let attestationChallenge: String
   public let imageReference: String
   public let imageStoreRoot: String
   public let kernelPath: String
@@ -66,6 +68,8 @@ public struct NativeRequest: Codable, Sendable {
   enum CodingKeys: String, CodingKey {
     case protocolVersion = "protocol_version"
     case containerID = "container_id"
+    case providerAttestationID = "provider_attestation_id"
+    case attestationChallenge = "attestation_challenge"
     case imageReference = "image_reference"
     case imageStoreRoot = "image_store_root"
     case kernelPath = "kernel_path"
@@ -94,6 +98,17 @@ public struct NativeRequest: Codable, Sendable {
     guard protocolVersion == "1" else { throw NativeContractError.invalid("protocol_version") }
     guard Self.matches(containerID, pattern: #"^drone-[a-f0-9]{24}$"#) else {
       throw NativeContractError.invalid("container_id")
+    }
+    guard
+      Self.matches(
+        providerAttestationID,
+        pattern: #"^attestation\.sha256\.[a-f0-9]{64}$"#
+      )
+    else {
+      throw NativeContractError.invalid("provider_attestation_id")
+    }
+    guard Self.matches(attestationChallenge, pattern: #"^[a-f0-9]{64}$"#) else {
+      throw NativeContractError.invalid("attestation_challenge")
     }
     guard
       Self.matches(
@@ -200,6 +215,59 @@ public struct NativeRequest: Codable, Sendable {
   }
 }
 
+public struct NativeExecutionAttestation: Codable, Sendable {
+  public let schemaVersion = "1"
+  public let profile = "apple_native_no_network_vm_v1"
+  public let providerAttestationID: String
+  public let challenge: String
+  public let containerID: String
+  public let imageReference: String
+  public let backend = "apple_containerization"
+  public let isolation = "lightweight_vm"
+  public let guestOS = "linux"
+  public let networkMode = "none"
+  public let ephemeralVM = true
+  public let readOnlyRoot = true
+  public let inputDiskReadOnly = true
+  public let outputDiskBounded = true
+  public let hostDirectorySharing = false
+  public let socketSharing = false
+  public let nestedVirtualization = false
+  public let nonRootRequired = true
+  public let noNewPrivileges = true
+  public let capabilities = "none"
+
+  public init(request: NativeRequest) {
+    providerAttestationID = request.providerAttestationID
+    challenge = request.attestationChallenge
+    containerID = request.containerID
+    imageReference = request.imageReference
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case schemaVersion = "schema_version"
+    case profile
+    case providerAttestationID = "provider_attestation_id"
+    case challenge
+    case containerID = "container_id"
+    case imageReference = "image_reference"
+    case backend
+    case isolation
+    case guestOS = "guest_os"
+    case networkMode = "network_mode"
+    case ephemeralVM = "ephemeral_vm"
+    case readOnlyRoot = "read_only_root"
+    case inputDiskReadOnly = "input_disk_read_only"
+    case outputDiskBounded = "output_disk_bounded"
+    case hostDirectorySharing = "host_directory_sharing"
+    case socketSharing = "socket_sharing"
+    case nestedVirtualization = "nested_virtualization"
+    case nonRootRequired = "non_root_required"
+    case noNewPrivileges = "no_new_privileges"
+    case capabilities
+  }
+}
+
 public struct NativeOutputResult: Codable, Sendable {
   public let name: String
   public let hostPath: String
@@ -226,6 +294,7 @@ public struct NativeResponse: Codable, Sendable {
   public let durationMilliseconds: Int
   public let stdoutBase64: String
   public let stderrBase64: String
+  public let attestation: NativeExecutionAttestation
   public let outputs: [NativeOutputResult]
 
   public init(
@@ -234,6 +303,7 @@ public struct NativeResponse: Codable, Sendable {
     durationMilliseconds: Int,
     stdoutBase64: String,
     stderrBase64: String,
+    attestation: NativeExecutionAttestation,
     outputs: [NativeOutputResult]
   ) {
     self.exitCode = exitCode
@@ -241,6 +311,7 @@ public struct NativeResponse: Codable, Sendable {
     self.durationMilliseconds = durationMilliseconds
     self.stdoutBase64 = stdoutBase64
     self.stderrBase64 = stderrBase64
+    self.attestation = attestation
     self.outputs = outputs
   }
 
@@ -252,6 +323,7 @@ public struct NativeResponse: Codable, Sendable {
     case durationMilliseconds = "duration_ms"
     case stdoutBase64 = "stdout_base64"
     case stderrBase64 = "stderr_base64"
+    case attestation
     case outputs
   }
 }
@@ -274,14 +346,40 @@ public struct NativeFailureResponse: Codable, Sendable {
 
 public struct NativeProbeResponse: Codable, Sendable {
   public let protocolVersion = "1"
+  public let profile = "apple_native_no_network_vm_v1"
   public let backend = "apple_containerization"
+  public let isolation = "lightweight_vm"
+  public let guestOS = "linux"
   public let networkMode = "none"
+  public let ephemeralVM = true
+  public let readOnlyRoot = true
+  public let inputDiskReadOnly = true
+  public let outputDiskBounded = true
+  public let hostDirectorySharing = false
+  public let socketSharing = false
+  public let nestedVirtualization = false
+  public let nonRootRequired = true
+  public let noNewPrivileges = true
+  public let capabilities = "none"
 
   public init() {}
 
   enum CodingKeys: String, CodingKey {
     case protocolVersion = "protocol_version"
+    case profile
     case backend
+    case isolation
+    case guestOS = "guest_os"
     case networkMode = "network_mode"
+    case ephemeralVM = "ephemeral_vm"
+    case readOnlyRoot = "read_only_root"
+    case inputDiskReadOnly = "input_disk_read_only"
+    case outputDiskBounded = "output_disk_bounded"
+    case hostDirectorySharing = "host_directory_sharing"
+    case socketSharing = "socket_sharing"
+    case nestedVirtualization = "nested_virtualization"
+    case nonRootRequired = "non_root_required"
+    case noNewPrivileges = "no_new_privileges"
+    case capabilities
   }
 }

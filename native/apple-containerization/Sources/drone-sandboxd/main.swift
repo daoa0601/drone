@@ -277,6 +277,7 @@ private func runSandbox(_ request: NativeRequest) async throws -> NativeResponse
     durationMilliseconds: max(0, Int(Date().timeIntervalSince(started) * 1_000)),
     stdoutBase64: stdout.data.base64EncodedString(),
     stderrBase64: stderr.data.base64EncodedString(),
+    attestation: NativeExecutionAttestation(request: request),
     outputs: outputs
   )
 }

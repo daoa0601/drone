@@ -13,6 +13,7 @@ declared outputs.
 Clients can supply only:
 
 - an operation ID;
+- the exact current provider-attestation ID they approve;
 - content-addressed artifact IDs for the operation's declared input slots.
 
 Clients cannot supply an image, command, environment variable, host path, mount, resource value,
@@ -67,12 +68,86 @@ pnpm dev
 
 `DRONE_HOME/operations.json` is created as an empty registry on first start. Runtime enablement is
 fail-closed: the configured worker, arm64 Linux kernel, vminit ext4 image, and local
-Containerization image store must all exist before `mutations_available` becomes true. Drone's
-runtime path never pulls an image; OCI images referenced by operations must already be present under
-`DRONE_APPLE_NATIVE_STATE`.
+Containerization image store must all exist, and the first three files must match a current signed
+attestation, before `mutations_available` becomes true. Drone's runtime path never pulls an image;
+OCI images referenced by operations must already be present under `DRONE_APPLE_NATIVE_STATE`.
 
 Do not use Apple's persistent `container machine` mode for specimen execution. Drone uses the
 Containerization library directly so `networking: false` is an invariant rather than an API option.
+
+### Provision the native runtime
+
+`pnpm native:build` builds the release Swift tools, ad-hoc signs only `drone-sandboxd` with the
+required `com.apple.security.virtualization` entitlement, verifies the signature, and rejects the
+build if `com.apple.vm.networking` appears. The operator-only `drone-provisioner` is deliberately a
+separate executable and is not part of the measured per-job driver.
+
+Resolve the release binary directory with Swift, then provision into private absolute paths:
+
+```bash
+NATIVE_BIN="$(swift build \
+  --package-path native/apple-containerization \
+  -c release \
+  --show-bin-path)"
+
+"$NATIVE_BIN/drone-provisioner" load-oci \
+  /private/drone/image-store \
+  /private/images/analyzer.oci.tar
+
+"$NATIVE_BIN/drone-provisioner" prepare-initfs \
+  /private/drone/image-store \
+  ghcr.io/apple/containerization/vminit@sha256:<64-hex-digest> \
+  /private/drone/runtime/initfs.ext4
+
+"$NATIVE_BIN/drone-provisioner" list /private/drone/image-store
+```
+
+Both commands reject relative paths; `prepare-initfs` requires an exact digest reference and refuses
+to overwrite an existing output. `load-oci` rejects unsafe archive members and records a pinned
+reference in the private Containerization image store. Supply a reviewed arm64 Linux kernel
+separately, set the four `DRONE_APPLE_NATIVE_*` paths in `.env`, and hash/review the signed driver,
+kernel, and initfs before issuing an attestation. Provisioning may use network or registry
+credentials in the trusted operator context; the measured runtime path never does.
+
+## Independent runtime attestation
+
+The service never receives an attestation private key. An operator first provisions and reviews the
+native worker, kernel, and init filesystem, then creates a measurement request. A separate signing
+context reviews that request and signs it with an offline Ed25519 key. Statements are valid for at
+most seven days.
+
+```bash
+# Build Drone before running these commands. Keep the private key outside DRONE_HOME and the repo.
+openssl genpkey -algorithm ED25519 -out /private/offline/drone-attestor.pem
+chmod 600 /private/offline/drone-attestor.pem
+openssl pkey -in /private/offline/drone-attestor.pem -pubout \
+  -out .drone/runtime/apple-native-attestor.pub.pem
+
+node dist/cli.js attestation request independent-reviewer <expires-at-UTC> \
+  > /private/offline/apple-native-request.json
+
+# Run only after independently reviewing the exact three digests and fixed isolation claims.
+node dist/cli.js attestation sign \
+  /private/offline/apple-native-request.json \
+  /private/offline/drone-attestor.pem \
+  .drone/runtime/apple-native-attestor.pub.pem \
+  > .drone/runtime/apple-native-attestation.json
+
+node dist/cli.js attestation verify
+```
+
+The signed payload binds SHA-256 identities for the exact native driver, Linux kernel, and initfs,
+plus the fixed no-network lightweight-VM policy. Provider readiness remeasures all three files and
+probes the measured driver. Every admitted job then receives a random challenge. The measured native
+driver returns a challenge-, provider-, image-, and VM-ID-bound execution statement, which Drone
+validates and stores in its content-addressed artifact store. Each durable job records both
+`provider_attestation_id` and, after a process result exists, `execution_attestation_artifact_id`.
+
+This is signed software-measurement attestation, not Apple hardware-backed remote guest attestation.
+It detects stale, substituted, expired, or untrusted runtime material and creates an auditable local
+chain. It does not defend against a compromised host kernel, root, or the same service account
+modifying process memory. Independence therefore depends on keeping the signing key and review
+outside the Drone service account and reviewing build provenance before signing.
 
 ## Operation registry
 
@@ -146,6 +221,13 @@ Restart Drone after changing the registry. Invalid or mutable image references p
 A bearer token is required for non-loopback binding. Tokenless loopback mode rejects requests with a
 browser `Origin` header. Jobs left active by a process restart are marked `interrupted`; they are
 never reconstructed from untrusted output.
+
+Provider responses expose the current attestation ID, key ID, issuer, and validity window. Job
+responses expose the provider attestation admitted at submission and the content-addressed execution
+statement after the native worker returns a process result. Consumers should reject a mutation when
+any of those correlations changes. Every job submission must repeat the approved
+`provider_attestation_id`; Drone compares it with the current remeasured provider before creating a
+job, closing the discovery-to-admission rotation race.
 
 The HTTP server applies a 10-second header watchdog, a 65-second request watchdog, and bounded body
 reads. Unsupported encodings, invalid framing, and oversized or invalid bodies are rejected; a

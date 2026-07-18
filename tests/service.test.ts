@@ -5,11 +5,20 @@ import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 
 import { decodeJobSubmission } from "../src/contracts.js";
-import type { ProviderStatus } from "../src/domain.js";
+import {
+  APPLE_NATIVE_ATTESTATION_PROFILE,
+  type ProviderExecutionAttestation,
+  type ProviderStatus,
+} from "../src/domain.js";
 import { providerFailed } from "../src/errors.js";
 import type { SandboxProvider } from "../src/provider.js";
 import { DroneService } from "../src/service.js";
-import { FakeAppleProvider, testConfig, writeRegistry } from "./helpers.js";
+import {
+  FakeAppleProvider,
+  PROVIDER_ATTESTATION_ID,
+  testConfig,
+  writeRegistry,
+} from "./helpers.js";
 
 async function terminal(service: DroneService, jobId: string): Promise<string> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -30,6 +39,7 @@ describe("DroneService", () => {
       decodeJobSubmission({
         schema_version: "1",
         operation_id: "test.inspect",
+        provider_attestation_id: PROVIDER_ATTESTATION_ID,
         inputs: { sample: input.artifact_id },
       }),
     );
@@ -38,8 +48,23 @@ describe("DroneService", () => {
     expect(result).toMatchObject({
       status: "succeeded",
       exit_code: 0,
+      provider_attestation_id: `attestation.sha256.${"a".repeat(64)}`,
+      execution_attestation_artifact_id: expect.stringMatching(/^sha256_[a-f0-9]{64}$/u),
       outputs: [{ name: "report", media_type: "application/json" }],
       stdout_artifact_id: expect.stringMatching(/^sha256_[a-f0-9]{64}$/u),
+    });
+    const executionAttestation = await service.artifactBytes(
+      result.execution_attestation_artifact_id!,
+    );
+    expect(executionAttestation.metadata.media_type).toBe(
+      "application/vnd.drone.execution-attestation+json",
+    );
+    expect(JSON.parse(executionAttestation.bytes.toString("utf8"))).toMatchObject({
+      profile: APPLE_NATIVE_ATTESTATION_PROFILE,
+      provider_attestation_id: result.provider_attestation_id,
+      image_reference: `registry.example/drone/tool@sha256:${"a".repeat(64)}`,
+      network_mode: "none",
+      ephemeral_vm: true,
     });
     await expect(service.listJobs()).resolves.toEqual([
       expect.objectContaining({ job_id: submitted.job_id }),
@@ -74,6 +99,7 @@ describe("DroneService", () => {
     const job = await service.submit({
       schema_version: "1",
       operation_id: "test.inspect",
+      provider_attestation_id: PROVIDER_ATTESTATION_ID,
       inputs: { sample: input.artifact_id },
     });
 
@@ -91,6 +117,7 @@ describe("DroneService", () => {
     const job = await service.submit({
       schema_version: "1",
       operation_id: "test.inspect",
+      provider_attestation_id: PROVIDER_ATTESTATION_ID,
       inputs: { sample: input.artifact_id },
     });
     const cancelled = await service.cancel(job.job_id);
@@ -111,16 +138,23 @@ describe("DroneService", () => {
       service.submit({
         schema_version: "1",
         operation_id: "test.inspect",
+        provider_attestation_id: PROVIDER_ATTESTATION_ID,
         inputs: { unknown: binary.artifact_id },
       }),
-    ).rejects.toMatchObject({ code: "INVALID_INPUT" });
-    await expect(
-      service.submit({ schema_version: "1", operation_id: "test.inspect", inputs: {} }),
     ).rejects.toMatchObject({ code: "INVALID_INPUT" });
     await expect(
       service.submit({
         schema_version: "1",
         operation_id: "test.inspect",
+        provider_attestation_id: PROVIDER_ATTESTATION_ID,
+        inputs: {},
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(
+      service.submit({
+        schema_version: "1",
+        operation_id: "test.inspect",
+        provider_attestation_id: PROVIDER_ATTESTATION_ID,
         inputs: { sample: text.artifact_id },
       }),
     ).rejects.toMatchObject({ code: "ARTIFACT_INVALID" });
@@ -137,6 +171,7 @@ describe("DroneService", () => {
     const submission = {
       schema_version: "1" as const,
       operation_id: "test.inspect",
+      provider_attestation_id: PROVIDER_ATTESTATION_ID,
       inputs: { sample: input.artifact_id },
     };
 
@@ -157,6 +192,7 @@ describe("DroneService", () => {
     const submission = {
       schema_version: "1" as const,
       operation_id: "test.inspect",
+      provider_attestation_id: PROVIDER_ATTESTATION_ID,
       inputs: { sample: input.artifact_id },
     };
     await expect(inputService.submit(submission)).rejects.toMatchObject({
@@ -168,6 +204,7 @@ describe("DroneService", () => {
       product: "Unavailable provider",
       installed: false,
       enabled: false,
+      attested: false,
       mutations_available: false,
       reason: "not_ready",
       isolation: "lightweight_vm",
@@ -181,6 +218,108 @@ describe("DroneService", () => {
     };
     const service = new DroneService(config, { providers: [unavailable] });
     await expect(service.submit(submission)).rejects.toMatchObject({ code: "SERVICE_UNAVAILABLE" });
+  });
+
+  it("rejects a provider that advertises mutations without an independent attestation", async () => {
+    const config = await testConfig();
+    await writeRegistry(config.operationsFile);
+    const ready = await new FakeAppleProvider().status();
+    const { attestation: _discarded, ...withoutAttestation } = ready;
+    const provider: SandboxProvider = {
+      providerId: "apple_native",
+      status: async () => ({
+        ...withoutAttestation,
+        mutations_available: true,
+        attested: false,
+      }),
+      run: () => Effect.die("unreachable"),
+    };
+    const service = new DroneService(config, { providers: [provider] });
+    const input = await service.stageArtifact(Buffer.from("sample"), "application/octet-stream");
+    await expect(
+      service.submit({
+        schema_version: "1",
+        operation_id: "test.inspect",
+        provider_attestation_id: PROVIDER_ATTESTATION_ID,
+        inputs: { sample: input.artifact_id },
+      }),
+    ).rejects.toMatchObject({ code: "SERVICE_UNAVAILABLE" });
+  });
+
+  it("rejects a rotated provider attestation atomically before creating or running a job", async () => {
+    const config = await testConfig();
+    await writeRegistry(config.operationsFile);
+    let runs = 0;
+    const provider = new FakeAppleProvider(() => {
+      runs += 1;
+      return Effect.never;
+    });
+    const service = new DroneService(config, { providers: [provider] });
+    const input = await service.stageArtifact(Buffer.from("sample"), "application/octet-stream");
+    await expect(
+      service.submit({
+        schema_version: "1",
+        operation_id: "test.inspect",
+        provider_attestation_id: `attestation.sha256.${"9".repeat(64)}`,
+        inputs: { sample: input.artifact_id },
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(runs).toBe(0);
+    expect(service.activeJobCount).toBe(0);
+    await expect(service.listJobs()).resolves.toEqual([]);
+  });
+
+  it("fails a job when execution evidence names a different provider attestation", async () => {
+    const config = await testConfig();
+    await writeRegistry(config.operationsFile);
+    const provider = new FakeAppleProvider((execution) =>
+      Effect.succeed({
+        exit_code: 0,
+        timed_out: false,
+        duration_ms: 1,
+        stdout: Buffer.alloc(0),
+        stderr: Buffer.alloc(0),
+        outputs: [],
+        attestation: {
+          schema_version: "1",
+          profile: APPLE_NATIVE_ATTESTATION_PROFILE,
+          provider_attestation_id: `attestation.sha256.${"f".repeat(64)}`,
+          challenge: execution.attestation_challenge,
+          container_id: `drone-${"c".repeat(24)}`,
+          image_reference: execution.operation.image,
+          backend: "apple_containerization",
+          isolation: "lightweight_vm",
+          guest_os: "linux",
+          network_mode: "none",
+          ephemeral_vm: true,
+          read_only_root: true,
+          input_disk_read_only: true,
+          output_disk_bounded: true,
+          host_directory_sharing: false,
+          socket_sharing: false,
+          nested_virtualization: false,
+          non_root_required: true,
+          no_new_privileges: true,
+          capabilities: "none",
+        } satisfies ProviderExecutionAttestation,
+      }),
+    );
+    const service = new DroneService(config, { providers: [provider] });
+    const input = await service.stageArtifact(Buffer.from("sample"), "application/octet-stream");
+    const submitted = await service.submit({
+      schema_version: "1",
+      operation_id: "test.inspect",
+      provider_attestation_id: PROVIDER_ATTESTATION_ID,
+      inputs: { sample: input.artifact_id },
+    });
+    expect(await terminal(service, submitted.job_id)).toBe("failed");
+    await expect(service.inspectJob(submitted.job_id)).resolves.toMatchObject({
+      status: "failed",
+      error_code: "PROVIDER_FAILED",
+    });
+    expect((await service.inspectJob(submitted.job_id)).execution_attestation_artifact_id).toBe(
+      undefined,
+    );
   });
 
   it("records provider errors, non-zero exits, timeouts, and stderr without leaking causes", async () => {
@@ -228,6 +367,7 @@ describe("DroneService", () => {
       const job = await service.submit({
         schema_version: "1",
         operation_id: "test.inspect",
+        provider_attestation_id: PROVIDER_ATTESTATION_ID,
         inputs: { sample: input.artifact_id },
       });
       expect(await terminal(service, job.job_id)).toBe("failed");
@@ -248,6 +388,7 @@ describe("DroneService", () => {
     const job = await service.submit({
       schema_version: "1",
       operation_id: "test.inspect",
+      provider_attestation_id: PROVIDER_ATTESTATION_ID,
       inputs: { sample: input.artifact_id },
     });
 

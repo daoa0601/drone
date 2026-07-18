@@ -5,7 +5,8 @@ let package = Package(
   name: "drone-apple-containerization",
   platforms: [.macOS("26.0")],
   products: [
-    .executable(name: "drone-sandboxd", targets: ["drone-sandboxd"])
+    .executable(name: "drone-sandboxd", targets: ["drone-sandboxd"]),
+    .executable(name: "drone-provisioner", targets: ["drone-provisioner"]),
   ],
   dependencies: [
     .package(
@@ -19,6 +20,7 @@ let package = Package(
   ],
   targets: [
     .target(name: "DroneNativeCore"),
+    .target(name: "DroneProvisioningCore"),
     .executableTarget(
       name: "drone-sandboxd",
       dependencies: [
@@ -29,6 +31,19 @@ let package = Package(
         .product(name: "SystemPackage", package: "swift-system"),
       ]
     ),
+    .executableTarget(
+      name: "drone-provisioner",
+      dependencies: [
+        "DroneProvisioningCore",
+        .product(name: "Containerization", package: "containerization"),
+        .product(name: "ContainerizationArchive", package: "containerization"),
+        .product(name: "ContainerizationOCI", package: "containerization"),
+      ]
+    ),
     .testTarget(name: "DroneNativeCoreTests", dependencies: ["DroneNativeCore"]),
+    .testTarget(
+      name: "DroneProvisioningCoreTests",
+      dependencies: ["DroneProvisioningCore"]
+    ),
   ]
 )

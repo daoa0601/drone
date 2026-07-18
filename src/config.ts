@@ -20,6 +20,8 @@ export interface DroneConfig {
   readonly appleNativeKernel: string;
   readonly appleNativeInitfs: string;
   readonly appleNativeStateRoot: string;
+  readonly appleNativeAttestationFile: string;
+  readonly appleNativeAttestationPublicKey: string;
 }
 
 function integer(
@@ -102,6 +104,14 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): DroneC
     ),
     appleNativeStateRoot: path.resolve(
       environment.DRONE_APPLE_NATIVE_STATE?.trim() || path.join(droneHome, "runtime", "state"),
+    ),
+    appleNativeAttestationFile: path.resolve(
+      environment.DRONE_APPLE_NATIVE_ATTESTATION?.trim() ||
+        path.join(droneHome, "runtime", "apple-native-attestation.json"),
+    ),
+    appleNativeAttestationPublicKey: path.resolve(
+      environment.DRONE_APPLE_NATIVE_ATTESTATION_PUBLIC_KEY?.trim() ||
+        path.join(droneHome, "runtime", "apple-native-attestor.pub.pem"),
     ),
   };
 }

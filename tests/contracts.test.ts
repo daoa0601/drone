@@ -47,17 +47,20 @@ describe("Drone contracts", () => {
       decodeJobSubmission({
         schema_version: "1",
         operation_id: "test.inspect",
+        provider_attestation_id: `attestation.sha256.${"a".repeat(64)}`,
         inputs: { sample: artifactId },
       }),
     ).toEqual({
       schema_version: "1",
       operation_id: "test.inspect",
+      provider_attestation_id: `attestation.sha256.${"a".repeat(64)}`,
       inputs: { sample: artifactId },
     });
     expect(() =>
       decodeJobSubmission({
         schema_version: "1",
         operation_id: "test.inspect",
+        provider_attestation_id: `attestation.sha256.${"a".repeat(64)}`,
         inputs: { sample: artifactId },
         command: ["/bin/sh"],
       }),

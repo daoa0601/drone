@@ -59,6 +59,7 @@ const RegistrySchema = Schema.Struct({
 const JobSubmissionSchema = Schema.Struct({
   schema_version: Schema.Literal("1"),
   operation_id: Schema.String,
+  provider_attestation_id: Schema.String,
   inputs: Schema.Record(Schema.String, Schema.String),
 });
 
@@ -74,6 +75,7 @@ const decodeJobShape = SchemaParser.decodeUnknownSync(JobSubmissionSchema, {
 const SAFE_ID = /^[a-z][a-z0-9_.-]{0,127}$/u;
 const SAFE_SLOT = /^[a-z][a-z0-9_-]{0,63}$/u;
 const ARTIFACT_ID = /^sha256_[a-f0-9]{64}$/u;
+const ATTESTATION_ID = /^attestation\.sha256\.[a-f0-9]{64}$/u;
 const IMAGE_DIGEST =
   /^(?:[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?\/)?[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[a-f0-9]{64}$/u;
 const MEDIA_TYPE = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$/iu;
@@ -268,9 +270,13 @@ export function decodeJobSubmission(value: unknown): JobSubmission {
       return [normalizedSlot, artifactId] as const;
     }),
   );
+  if (!ATTESTATION_ID.test(input.provider_attestation_id)) {
+    throw invalidInput("provider_attestation_id is invalid.");
+  }
   return {
     schema_version: "1",
     operation_id: safeId(input.operation_id, "operation_id"),
+    provider_attestation_id: input.provider_attestation_id,
     inputs,
   };
 }

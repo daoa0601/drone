@@ -13,6 +13,7 @@ function record(jobId: string, status: JobStatus, submittedAt = "2026-01-01T00:0
     job_id: jobId,
     operation_id: "test.inspect",
     provider_id: "apple_native",
+    provider_attestation_id: `attestation.sha256.${"a".repeat(64)}`,
     status,
     inputs: {},
     outputs: [],

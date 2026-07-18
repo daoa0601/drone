@@ -3,7 +3,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import { startHttpServer } from "../src/http.js";
 import type { DroneHttpServer } from "../src/http.js";
 import { DroneService } from "../src/service.js";
-import { FakeAppleProvider, testConfig, writeRegistry } from "./helpers.js";
+import {
+  FakeAppleProvider,
+  PROVIDER_ATTESTATION_ID,
+  testConfig,
+  writeRegistry,
+} from "./helpers.js";
 
 const TOKEN = "drone-test-token";
 const AUTH = { Authorization: `Bearer ${TOKEN}` };
@@ -54,6 +59,7 @@ describe("Drone HTTP API", () => {
       body: JSON.stringify({
         schema_version: "1",
         operation_id: "test.inspect",
+        provider_attestation_id: PROVIDER_ATTESTATION_ID,
         inputs: { sample: staged.artifact_id },
       }),
     });

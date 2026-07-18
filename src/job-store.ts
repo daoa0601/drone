@@ -6,6 +6,8 @@ import type { JobRecord, JobStatus, ProviderId } from "./domain.js";
 import { DroneError, invalidInput } from "./errors.js";
 
 const JOB_ID = /^job_[a-f0-9]{32}$/u;
+const ATTESTATION_ID = /^attestation\.sha256\.[a-f0-9]{64}$/u;
+const ARTIFACT_ID = /^sha256_[a-f0-9]{64}$/u;
 const TERMINAL = new Set<JobStatus>(["succeeded", "failed", "cancelled", "interrupted"]);
 const PROVIDERS = new Set<ProviderId>(["apple_native"]);
 
@@ -19,6 +21,8 @@ function persistedJob(value: unknown): JobRecord {
     typeof job.operation_id !== "string" ||
     typeof job.provider_id !== "string" ||
     !PROVIDERS.has(job.provider_id as ProviderId) ||
+    typeof job.provider_attestation_id !== "string" ||
+    !ATTESTATION_ID.test(job.provider_attestation_id) ||
     typeof job.status !== "string" ||
     !["queued", "running", "succeeded", "failed", "cancelled", "interrupted"].includes(
       job.status,
@@ -26,7 +30,10 @@ function persistedJob(value: unknown): JobRecord {
     typeof job.inputs !== "object" ||
     job.inputs === null ||
     !Array.isArray(job.outputs) ||
-    typeof job.submitted_at !== "string"
+    typeof job.submitted_at !== "string" ||
+    (job.execution_attestation_artifact_id !== undefined &&
+      (typeof job.execution_attestation_artifact_id !== "string" ||
+        !ARTIFACT_ID.test(job.execution_attestation_artifact_id)))
   ) {
     throw new Error("job record is invalid");
   }

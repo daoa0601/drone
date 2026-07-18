@@ -1,7 +1,67 @@
 export const DRONE_PROTOCOL_VERSION = "1" as const;
+export const APPLE_NATIVE_ATTESTATION_PROFILE = "apple_native_no_network_vm_v1" as const;
 
 export type ProviderId = "apple_native";
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "interrupted";
+export type ProviderAttestationProfile = typeof APPLE_NATIVE_ATTESTATION_PROFILE;
+
+export interface ProviderAttestationSummary {
+  readonly attestation_id: string;
+  readonly profile: ProviderAttestationProfile;
+  readonly key_id: string;
+  readonly issuer: string;
+  readonly issued_at: string;
+  readonly expires_at: string;
+}
+
+export interface AppleNativeIsolationClaims {
+  readonly backend: "apple_containerization";
+  readonly isolation: "lightweight_vm";
+  readonly guest_os: "linux";
+  readonly network_mode: "none";
+  readonly ephemeral_vm: true;
+  readonly read_only_root: true;
+  readonly input_disk_read_only: true;
+  readonly output_disk_bounded: true;
+  readonly host_directory_sharing: false;
+  readonly socket_sharing: false;
+  readonly nested_virtualization: false;
+  readonly non_root_required: true;
+  readonly no_new_privileges: true;
+  readonly capabilities: "none";
+}
+
+export interface AppleNativeAttestationPayload {
+  readonly schema_version: "1";
+  readonly profile: ProviderAttestationProfile;
+  readonly provider_id: "apple_native";
+  readonly issuer: string;
+  readonly issued_at: string;
+  readonly expires_at: string;
+  readonly measurements: {
+    readonly driver_sha256: string;
+    readonly kernel_sha256: string;
+    readonly initfs_sha256: string;
+  };
+  readonly claims: AppleNativeIsolationClaims;
+}
+
+export interface SignedProviderAttestation {
+  readonly schema_version: "1";
+  readonly attestation_id: string;
+  readonly key_id: string;
+  readonly payload: AppleNativeAttestationPayload;
+  readonly signature: string;
+}
+
+export interface ProviderExecutionAttestation extends AppleNativeIsolationClaims {
+  readonly schema_version: "1";
+  readonly profile: ProviderAttestationProfile;
+  readonly provider_attestation_id: string;
+  readonly challenge: string;
+  readonly container_id: string;
+  readonly image_reference: string;
+}
 
 export interface OperationInputSlot {
   readonly name: string;
@@ -59,6 +119,7 @@ export interface PublicOperation {
 export interface JobSubmission {
   readonly schema_version: "1";
   readonly operation_id: string;
+  readonly provider_attestation_id: string;
   readonly inputs: Readonly<Record<string, string>>;
 }
 
@@ -83,6 +144,7 @@ export interface JobRecord {
   readonly job_id: string;
   readonly operation_id: string;
   readonly provider_id: ProviderId;
+  readonly provider_attestation_id: string;
   readonly status: JobStatus;
   readonly inputs: Readonly<Record<string, string>>;
   readonly outputs: ReadonlyArray<JobOutputArtifact>;
@@ -93,6 +155,7 @@ export interface JobRecord {
   readonly timed_out?: boolean;
   readonly stdout_artifact_id?: string;
   readonly stderr_artifact_id?: string;
+  readonly execution_attestation_artifact_id?: string;
   readonly error_code?: string;
 }
 
@@ -102,6 +165,8 @@ export interface ProviderStatus {
   readonly installed: boolean;
   readonly enabled: boolean;
   readonly mutations_available: boolean;
+  readonly attested: boolean;
+  readonly attestation?: ProviderAttestationSummary;
   readonly reason: string;
   readonly isolation: "lightweight_vm";
   readonly guest_os: ReadonlyArray<"linux">;
@@ -117,6 +182,8 @@ export interface ResolvedInputArtifact {
 
 export interface ProviderExecution {
   readonly job_id: string;
+  readonly provider_attestation_id: string;
+  readonly attestation_challenge: string;
   readonly operation: OperationDefinition;
   readonly inputs: ReadonlyArray<ResolvedInputArtifact>;
 }
@@ -133,11 +200,14 @@ export interface ProviderExecutionResult {
   readonly stdout: Uint8Array;
   readonly stderr: Uint8Array;
   readonly outputs: ReadonlyArray<ProviderOutput>;
+  readonly attestation: ProviderExecutionAttestation;
 }
 
 export interface NativeDriverRequest {
   readonly protocol_version: "1";
   readonly container_id: string;
+  readonly provider_attestation_id: string;
+  readonly attestation_challenge: string;
   readonly image_reference: string;
   readonly image_store_root: string;
   readonly kernel_path: string;

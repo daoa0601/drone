@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from "node:crypto";
 import { chmod, mkdir, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -5,17 +6,26 @@ import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 
 import { AppleNativeProvider, buildNativeDriverRequest } from "../src/apple-native.js";
+import {
+  APPLE_NATIVE_ISOLATION_CLAIMS,
+  createAppleNativeAttestationPayload,
+  signProviderAttestation,
+} from "../src/attestation.js";
 import { decodeOperationRegistry } from "../src/contracts.js";
 import type { ProviderExecution } from "../src/domain.js";
 import { operation, temporaryDirectory } from "./helpers.js";
 
-function testExecution(): ProviderExecution {
+function testExecution(
+  providerAttestationId = `attestation.sha256.${"a".repeat(64)}`,
+): ProviderExecution {
   const definition = decodeOperationRegistry({
     schema_version: "1",
     operations: [operation()],
   })[0]!;
   return {
     job_id: "job_0123456789abcdef0123456789abcdef",
+    provider_attestation_id: providerAttestationId,
+    attestation_challenge: "d".repeat(64),
     operation: definition,
     inputs: [
       {
@@ -34,23 +44,99 @@ function testExecution(): ProviderExecution {
   };
 }
 
+function responseSource(overrides = ""): string {
+  return String.raw`
+let body = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => body += chunk);
+process.stdin.on("end", () => {
+  const request = JSON.parse(body);
+  process.stdout.write(JSON.stringify({
+    protocol_version: "1",
+    ok: true,
+    exit_code: 0,
+    timed_out: false,
+    duration_ms: 1,
+    stdout_base64: "",
+    stderr_base64: "",
+    outputs: [],
+    attestation: {
+      schema_version: "1",
+      profile: "apple_native_no_network_vm_v1",
+      provider_attestation_id: request.provider_attestation_id,
+      challenge: request.attestation_challenge,
+      container_id: request.container_id,
+      image_reference: request.image_reference,
+      backend: "apple_containerization",
+      isolation: "lightweight_vm",
+      guest_os: "linux",
+      network_mode: "none",
+      ephemeral_vm: true,
+      read_only_root: true,
+      input_disk_read_only: true,
+      output_disk_bounded: true,
+      host_directory_sharing: false,
+      socket_sharing: false,
+      nested_virtualization: false,
+      non_root_required: true,
+      no_new_privileges: true,
+      capabilities: "none"
+    },
+    ${overrides}
+  }));
+});`;
+}
+
 async function provisionedProvider(
   driverSource: string,
   enabled = true,
-): Promise<{ provider: AppleNativeProvider; runs: string }> {
+): Promise<{ provider: AppleNativeProvider; runs: string; attestationId: string }> {
   const root = await temporaryDirectory("drone-apple-run-");
   const driver = path.join(root, "drone-sandboxd");
   const kernel = path.join(root, "vmlinux");
   const initfs = path.join(root, "vminit.ext4");
   const state = path.join(root, "state");
   const runs = path.join(root, "runs");
+  const attestationFile = path.join(root, "attestation.json");
+  const attestationPublicKey = path.join(root, "attestor.pub.pem");
+  const probe = {
+    protocol_version: "1",
+    profile: "apple_native_no_network_vm_v1",
+    ...APPLE_NATIVE_ISOLATION_CLAIMS,
+  };
+  const wrappedDriver = `
+if (process.argv[2] === "probe") {
+  process.stdout.write(${JSON.stringify(JSON.stringify(probe))});
+  process.exit(0);
+}
+${driverSource}`;
   await Promise.all([
-    writeFile(driver, `#!${process.execPath}\n${driverSource}\n`),
+    writeFile(driver, `#!${process.execPath}\n${wrappedDriver}\n`),
     writeFile(kernel, "kernel"),
     writeFile(initfs, "init"),
     mkdir(state),
   ]);
   await chmod(driver, 0o700);
+  const keys = generateKeyPairSync("ed25519");
+  const publicKeyPem = keys.publicKey.export({ type: "spki", format: "pem" });
+  const privateKeyPem = keys.privateKey.export({ type: "pkcs8", format: "pem" });
+  const issuedAt = new Date();
+  const payload = await createAppleNativeAttestationPayload({
+    measurements: { driverPath: driver, kernelPath: kernel, initfsPath: initfs },
+    issuer: "independent-test-attestor",
+    issuedAt,
+    expiresAt: new Date(issuedAt.valueOf() + 60 * 60 * 1000),
+  });
+  const attestation = signProviderAttestation({
+    payload,
+    privateKeyPem,
+    publicKeyPem,
+    now: issuedAt,
+  });
+  await Promise.all([
+    writeFile(attestationFile, `${JSON.stringify(attestation)}\n`, { mode: 0o600 }),
+    writeFile(attestationPublicKey, publicKeyPem, { mode: 0o600 }),
+  ]);
   return {
     provider: new AppleNativeProvider({
       enabled,
@@ -59,10 +145,13 @@ async function provisionedProvider(
       initfsPath: initfs,
       stateRoot: state,
       runsRoot: runs,
+      attestationFile,
+      attestationPublicKey,
       platform: "darwin",
       architecture: "arm64",
     }),
     runs,
+    attestationId: attestation.attestation_id,
   };
 }
 
@@ -78,6 +167,8 @@ describe("Apple native provider", () => {
         initfsPath: "/opt/drone/vminit.ext4",
         stateRoot: "/opt/drone/state",
         runsRoot: "/opt/drone/runs",
+        attestationFile: "/opt/drone/attestation.json",
+        attestationPublicKey: "/opt/drone/attestor.pub.pem",
       },
       "/opt/drone/runs/one",
     );
@@ -93,32 +184,13 @@ describe("Apple native provider", () => {
   });
 
   it("reports ready only when the complete Apple runtime is present and enabled", async () => {
-    const root = await temporaryDirectory("drone-apple-status-");
-    const driver = path.join(root, "drone-sandboxd");
-    const kernel = path.join(root, "vmlinux");
-    const initfs = path.join(root, "vminit.ext4");
-    const state = path.join(root, "state");
-    await Promise.all([
-      writeFile(driver, "driver"),
-      writeFile(kernel, "kernel"),
-      writeFile(initfs, "init"),
-    ]);
-    await chmod(driver, 0o700);
-    await mkdir(state);
-    const provider = new AppleNativeProvider({
-      enabled: true,
-      driverPath: driver,
-      kernelPath: kernel,
-      initfsPath: initfs,
-      stateRoot: state,
-      runsRoot: path.join(root, "runs"),
-      platform: "darwin",
-      architecture: "arm64",
-    });
+    const { provider, attestationId } = await provisionedProvider("process.exit(0);");
     await expect(provider.status()).resolves.toMatchObject({
       installed: true,
       enabled: true,
       mutations_available: true,
+      attested: true,
+      attestation: { attestation_id: attestationId },
       reason: "ready",
       network_modes: ["none"],
     });
@@ -133,6 +205,8 @@ describe("Apple native provider", () => {
       initfsPath: path.join(root, "initfs"),
       stateRoot: path.join(root, "state"),
       runsRoot: path.join(root, "runs"),
+      attestationFile: path.join(root, "attestation.json"),
+      attestationPublicKey: path.join(root, "attestor.pub.pem"),
       platform: "darwin" as const,
       architecture: "arm64",
     };
@@ -157,6 +231,13 @@ describe("Apple native provider", () => {
       reason: "image_store_not_provisioned",
     });
     await mkdir(options.stateRoot);
+    await expect(new AppleNativeProvider(options).status()).resolves.toMatchObject({
+      installed: true,
+      enabled: true,
+      attested: false,
+      mutations_available: false,
+      reason: "attestation_missing_invalid_or_expired",
+    });
     await expect(
       new AppleNativeProvider({ ...options, enabled: false }).status(),
     ).resolves.toMatchObject({
@@ -190,12 +271,34 @@ process.stdin.on("end", () => {
     duration_ms: 7,
     stdout_base64: Buffer.from("complete\n").toString("base64"),
     stderr_base64: "",
+    attestation: {
+      schema_version: "1",
+      profile: "apple_native_no_network_vm_v1",
+      provider_attestation_id: request.provider_attestation_id,
+      challenge: request.attestation_challenge,
+      container_id: request.container_id,
+      image_reference: request.image_reference,
+      backend: "apple_containerization",
+      isolation: "lightweight_vm",
+      guest_os: "linux",
+      network_mode: "none",
+      ephemeral_vm: true,
+      read_only_root: true,
+      input_disk_read_only: true,
+      output_disk_bounded: true,
+      host_directory_sharing: false,
+      socket_sharing: false,
+      nested_virtualization: false,
+      non_root_required: true,
+      no_new_privileges: true,
+      capabilities: "none"
+    },
     outputs: [{ name: "report", host_path: output, size_bytes: bytes.length }]
   }));
 });`;
-    const { provider, runs } = await provisionedProvider(source);
+    const { provider, runs, attestationId } = await provisionedProvider(source);
 
-    const result = await Effect.runPromise(provider.run(testExecution()));
+    const result = await Effect.runPromise(provider.run(testExecution(attestationId)));
 
     expect(result).toMatchObject({ exit_code: 0, timed_out: false, duration_ms: 7 });
     expect(Buffer.from(result.stdout).toString()).toBe("complete\n");
@@ -212,28 +315,26 @@ process.stdin.on("end", () => {
       "invalid protocol response",
       'process.stdout.write(JSON.stringify({ protocol_version: "2", ok: true }));',
     ],
-    [
-      "invalid log encoding",
-      'process.stdout.write(JSON.stringify({ protocol_version: "1", ok: true, exit_code: 0, timed_out: false, duration_ms: 1, stdout_base64: "%%%", stderr_base64: "", outputs: [] }));',
-    ],
-    [
-      "missing required output",
-      'process.stdout.write(JSON.stringify({ protocol_version: "1", ok: true, exit_code: 0, timed_out: false, duration_ms: 1, stdout_base64: "", stderr_base64: "", outputs: [] }));',
-    ],
+    ["invalid log encoding", responseSource('stdout_base64: "%%%",')],
+    ["missing required output", responseSource()],
     [
       "output path escape",
-      'process.stdout.write(JSON.stringify({ protocol_version: "1", ok: true, exit_code: 0, timed_out: false, duration_ms: 1, stdout_base64: "", stderr_base64: "", outputs: [{ name: "report", host_path: "/tmp/escape", size_bytes: 1 }] }));',
+      responseSource('outputs: [{ name: "report", host_path: "/tmp/escape", size_bytes: 1 }],'),
     ],
   ])("fails closed on %s", async (_label, source) => {
-    const { provider } = await provisionedProvider(source);
-    await expect(Effect.runPromise(provider.run(testExecution()))).rejects.toMatchObject({
+    const { provider, attestationId } = await provisionedProvider(source);
+    await expect(
+      Effect.runPromise(provider.run(testExecution(attestationId))),
+    ).rejects.toMatchObject({
       code: "PROVIDER_FAILED",
     });
   });
 
   it("rejects execution while the native provider is disabled", async () => {
-    const { provider } = await provisionedProvider("process.exit(0);", false);
-    await expect(Effect.runPromise(provider.run(testExecution()))).rejects.toMatchObject({
+    const { provider, attestationId } = await provisionedProvider("process.exit(0);", false);
+    await expect(
+      Effect.runPromise(provider.run(testExecution(attestationId))),
+    ).rejects.toMatchObject({
       code: "SERVICE_UNAVAILABLE",
     });
   });

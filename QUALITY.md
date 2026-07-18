@@ -18,6 +18,11 @@ Native validation requires macOS 26/Xcode 26 and may download Swift dependencies
 Tests must use fake providers and must never pull an OCI image, start an Apple container, execute a
 submitted artifact, or require a provisioned sandbox.
 
+The TypeScript suite includes signed-measurement substitution, trust-key, expiry, job-challenge, and
+private-key-permission failures. Swift contract tests cover the attestation/challenge fields and the
+fixed no-network request. A real VM boot remains an explicit operator smoke test because it requires
+separately provisioned runtime assets and OCI images.
+
 ## Local sibling contract
 
 `@agentic-orch/node-guardrails` and `@agentic-orch/ts-quality` are `workspace:*` dependencies. The

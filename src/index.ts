@@ -1,4 +1,5 @@
 export * from "./apple-native.js";
+export * from "./attestation.js";
 export * from "./artifact-store.js";
 export * from "./config.js";
 export * from "./contracts.js";

@@ -5,9 +5,17 @@ import path from "node:path";
 import { Effect } from "effect";
 
 import type { DroneConfig } from "../src/config.js";
-import type { ProviderExecution, ProviderExecutionResult, ProviderStatus } from "../src/domain.js";
+import {
+  APPLE_NATIVE_ATTESTATION_PROFILE,
+  type ProviderExecution,
+  type ProviderExecutionAttestation,
+  type ProviderExecutionResult,
+  type ProviderStatus,
+} from "../src/domain.js";
 import type { DroneError } from "../src/errors.js";
 import type { SandboxProvider } from "../src/provider.js";
+
+export const PROVIDER_ATTESTATION_ID = `attestation.sha256.${"a".repeat(64)}`;
 
 export async function temporaryDirectory(prefix = "drone-test-"): Promise<string> {
   return mkdtemp(path.join(os.tmpdir(), prefix));
@@ -31,6 +39,12 @@ export async function testConfig(overrides: Partial<DroneConfig> = {}): Promise<
     appleNativeKernel: path.join(droneHome, "runtime", "vmlinux-arm64"),
     appleNativeInitfs: path.join(droneHome, "runtime", "vminit.ext4"),
     appleNativeStateRoot: path.join(droneHome, "runtime", "state"),
+    appleNativeAttestationFile: path.join(droneHome, "runtime", "apple-native-attestation.json"),
+    appleNativeAttestationPublicKey: path.join(
+      droneHome,
+      "runtime",
+      "apple-native-attestor.pub.pem",
+    ),
     ...overrides,
   };
 }
@@ -89,14 +103,20 @@ export async function writeRegistry(
 
 export class FakeAppleProvider implements SandboxProvider {
   readonly providerId = "apple_native" as const;
-  readonly #run: (
-    execution: ProviderExecution,
-  ) => Effect.Effect<ProviderExecutionResult, DroneError>;
+  readonly #run: (execution: ProviderExecution) => Effect.Effect<
+    Omit<ProviderExecutionResult, "attestation"> & {
+      readonly attestation?: ProviderExecutionAttestation;
+    },
+    DroneError
+  >;
 
   constructor(
-    run: (
-      execution: ProviderExecution,
-    ) => Effect.Effect<ProviderExecutionResult, DroneError> = () =>
+    run: (execution: ProviderExecution) => Effect.Effect<
+      Omit<ProviderExecutionResult, "attestation"> & {
+        readonly attestation?: ProviderExecutionAttestation;
+      },
+      DroneError
+    > = () =>
       Effect.succeed({
         exit_code: 0,
         timed_out: false,
@@ -126,6 +146,15 @@ export class FakeAppleProvider implements SandboxProvider {
       installed: true,
       enabled: true,
       mutations_available: true,
+      attested: true,
+      attestation: {
+        attestation_id: PROVIDER_ATTESTATION_ID,
+        profile: APPLE_NATIVE_ATTESTATION_PROFILE,
+        key_id: `ed25519.sha256.${"b".repeat(64)}`,
+        issuer: "drone-test-attestor",
+        issued_at: "2026-07-18T08:00:00.000Z",
+        expires_at: "2026-07-25T08:00:00.000Z",
+      },
       reason: "ready",
       isolation: "lightweight_vm",
       guest_os: ["linux"],
@@ -134,6 +163,34 @@ export class FakeAppleProvider implements SandboxProvider {
   }
 
   run(execution: ProviderExecution): Effect.Effect<ProviderExecutionResult, DroneError> {
-    return this.#run(execution);
+    return this.#run(execution).pipe(
+      Effect.map((result) => ({
+        ...result,
+        attestation:
+          result.attestation ??
+          ({
+            schema_version: "1",
+            profile: APPLE_NATIVE_ATTESTATION_PROFILE,
+            provider_attestation_id: execution.provider_attestation_id,
+            challenge: execution.attestation_challenge,
+            container_id: `drone-${"c".repeat(24)}`,
+            image_reference: execution.operation.image,
+            backend: "apple_containerization",
+            isolation: "lightweight_vm",
+            guest_os: "linux",
+            network_mode: "none",
+            ephemeral_vm: true,
+            read_only_root: true,
+            input_disk_read_only: true,
+            output_disk_bounded: true,
+            host_directory_sharing: false,
+            socket_sharing: false,
+            nested_virtualization: false,
+            non_root_required: true,
+            no_new_privileges: true,
+            capabilities: "none",
+          } satisfies ProviderExecutionAttestation),
+      })),
+    );
   }
 }
