@@ -1,0 +1,77 @@
+{
+  "name": "drone-sandbox",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A reusable policy-gated sandbox deployment service",
+  "license": "MIT",
+  "packageManager": "pnpm@11.13.1",
+  "engines": {
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0",
+    "pnpm": "11.13.1"
+  },
+  "bin": {
+    "drone": "./dist/cli.js"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "native/apple-containerization/Package.swift",
+    "native/apple-containerization/Sources",
+    "README.md",
+    "QUALITY.md",
+    "LICENSE",
+    "scripts/quality/require-pnpm.mjs"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "pnpm quality:quick && pnpm test",
+    "deps:audit": "pnpm audit --prod --audit-level high",
+    "deps:check": "pnpm deps:audit && pnpm deps:signatures",
+    "deps:signatures": "pnpm audit signatures",
+    "dev": "pnpm build && node --env-file-if-exists=.env --enable-source-maps dist/cli.js serve",
+    "doctor": "pnpm build && node --env-file-if-exists=.env --enable-source-maps dist/cli.js doctor",
+    "drone": "pnpm build && node --env-file-if-exists=.env --enable-source-maps dist/cli.js",
+    "format": "prettier --write . --ignore-unknown",
+    "format:check": "prettier --check . --ignore-unknown",
+    "hooks:install": "ts-quality hooks",
+    "lint": "oxlint src tests scripts vitest.config.ts --deny-warnings",
+    "native:build": "swift build --package-path native/apple-containerization -c release --jobs 4",
+    "native:check": "pnpm native:format:check && swift test --package-path native/apple-containerization --jobs 4",
+    "native:format:check": "swift format lint --recursive --strict native/apple-containerization/Sources native/apple-containerization/Tests native/apple-containerization/Package.swift",
+    "pack:check": "ts-quality pack",
+    "preflight": "pnpm quality",
+    "preinstall": "node scripts/quality/require-pnpm.mjs",
+    "quality": "pnpm quality:offline && pnpm deps:check",
+    "quality:offline": "pnpm quality:quick && pnpm test:coverage && pnpm build && pnpm pack:check",
+    "quality:quick": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm secrets:scan",
+    "secrets:scan": "ts-quality secrets",
+    "start": "node --env-file-if-exists=.env --enable-source-maps dist/cli.js serve",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agentic-orch/node-guardrails": "workspace:*",
+    "effect": "4.0.0-beta.98"
+  },
+  "devDependencies": {
+    "@agentic-orch/ts-quality": "workspace:*",
+    "@types/node": "22.20.1",
+    "@vitest/coverage-v8": "4.1.10",
+    "oxlint": "1.74.0",
+    "prettier": "3.9.5",
+    "typescript": "6.0.3",
+    "vitest": "4.1.10"
+  },
+  "tsQuality": {
+    "pack": {
+      "forbiddenPrefixes": [
+        "native/apple-containerization/.build/",
+        "native/apple-containerization/Tests/"
+      ]
+    }
+  }
+}

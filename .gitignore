@@ -1,0 +1,7 @@
+.DS_Store
+.drone/
+.env
+coverage/
+dist/
+node_modules/
+native/apple-containerization/.build/

@@ -1,0 +1,25 @@
+packages:
+  - "."
+  - "../node-guardrails"
+  - "../ts-quality"
+
+linkWorkspacePackages: true
+sharedWorkspaceLockfile: false
+
+auditLevel: high
+blockExoticSubdeps: true
+engineStrict: true
+minimumReleaseAge: 1440
+minimumReleaseAgeIgnoreMissingTime: false
+minimumReleaseAgeStrict: true
+nodeVersion: 22.22.2
+pmOnFail: error
+savePrefix: ""
+strictDepBuilds: true
+strictPeerDependencies: true
+verifyDepsBeforeRun: error
+
+allowBuilds:
+  "@agentic-orch/ts-quality": true
+  esbuild: true
+  msgpackr-extract: false

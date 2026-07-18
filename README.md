@@ -1,0 +1,195 @@
+# Drone
+
+Drone is a reusable local sandbox deployment service. It gives Templar and other applications one
+small API for staging artifacts and running operator-defined operations in disposable environments.
+
+The first executable backend uses Apple Containerization directly. Every job receives a separate
+Virtualization.framework Linux VM. The backend creates no network interface, exposes no host
+directory, runs a non-root process without Linux capabilities, and destroys the VM after collecting
+declared outputs.
+
+## Boundary
+
+Clients can supply only:
+
+- an operation ID;
+- content-addressed artifact IDs for the operation's declared input slots.
+
+Clients cannot supply an image, command, environment variable, host path, mount, resource value,
+architecture, user, or networking mode. Those live in the local operation registry managed by the
+Drone operator.
+
+```text
+Templar or another local client
+  -> Drone HTTP API
+       -> artifact and job stores
+       -> trusted operation registry
+       -> provider router
+            -> Apple native worker
+                 -> one no-NIC lightweight VM
+                 -> read-only OCI root + bounded writable layer
+                 -> fixed-size ext4 input/output disks
+```
+
+Drone verifies and bounds artifact bytes through one content-store file handle before provider
+admission. The path-only native worker receives a read-only copy in a unique private run directory,
+not the reopenable content-store pathname; that copy exists only for the scoped provider run. The
+input disk is mounted read-only. The output disk has a fixed capacity and only declared files are
+extracted. Specimen code never receives a host directory, home directory, SSH socket, registry
+credential, or inherited host environment.
+
+## Setup
+
+Requirements:
+
+- Apple silicon and macOS 26 or later for the native backend;
+- Swift 6.2/Xcode 26 for building the worker;
+- Node.js and pnpm versions declared in `package.json`;
+- sibling checkouts at `../node-guardrails` and `../ts-quality` for the current frozen install.
+
+```bash
+pnpm install --frozen-lockfile
+pnpm check
+pnpm native:build
+```
+
+`package.json` uses `workspace:*` for `@agentic-orch/node-guardrails` and
+`@agentic-orch/ts-quality`. The current lock resolves both as sibling `link:` entries, so
+`pnpm install --frozen-lockfile` requires both directories above and cannot silently fall back to a
+registry package.
+
+The service starts safely with no enabled operation and with the native provider disabled:
+
+```bash
+cp .env.example .env
+pnpm dev
+```
+
+`DRONE_HOME/operations.json` is created as an empty registry on first start. Runtime enablement is
+fail-closed: the configured worker, arm64 Linux kernel, vminit ext4 image, and local
+Containerization image store must all exist before `mutations_available` becomes true. Drone's
+runtime path never pulls an image; OCI images referenced by operations must already be present under
+`DRONE_APPLE_NATIVE_STATE`.
+
+Do not use Apple's persistent `container machine` mode for specimen execution. Drone uses the
+Containerization library directly so `networking: false` is an invariant rather than an API option.
+
+## Operation registry
+
+An operation pins an OCI digest and fixes every part of execution policy:
+
+```json
+{
+  "schema_version": "1",
+  "operations": [
+    {
+      "operation_id": "pe.static_snapshot",
+      "enabled": true,
+      "provider": "apple_native",
+      "image": "registry.example/drone/pe-tools@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "command": ["/usr/local/bin/capture-pe", "/drone/input/sample", "/drone/output/report"],
+      "environment": {},
+      "architecture": "arm64",
+      "network": "none",
+      "uid": 65532,
+      "gid": 65532,
+      "inputs": [
+        {
+          "name": "sample",
+          "required": true,
+          "max_bytes": 33554432,
+          "media_types": ["application/vnd.microsoft.portable-executable"]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "report",
+          "required": true,
+          "max_bytes": 1048576,
+          "media_type": "application/json"
+        }
+      ],
+      "resources": {
+        "cpus": 2,
+        "memory_mb": 2048,
+        "rootfs_mb": 4096,
+        "writable_mb": 256,
+        "output_disk_mb": 32,
+        "timeout_seconds": 120,
+        "max_log_bytes": 262144,
+        "max_processes": 64,
+        "max_open_files": 256
+      }
+    }
+  ]
+}
+```
+
+Restart Drone after changing the registry. Invalid or mutable image references prevent readiness.
+
+## HTTP API
+
+| Method and path                 | Purpose                                      |
+| ------------------------------- | -------------------------------------------- |
+| `GET /health/live`              | Process liveness.                            |
+| `GET /health/ready`             | Store and registry readiness.                |
+| `GET /v1/providers`             | Provider availability and capabilities.      |
+| `GET /v1/operations`            | Public operation declarations.               |
+| `POST /v1/artifacts`            | Stage a bounded binary artifact.             |
+| `GET /v1/artifacts/:id`         | Read artifact metadata.                      |
+| `GET /v1/artifacts/:id/content` | Download artifact content.                   |
+| `POST /v1/jobs`                 | Submit an operation with artifact IDs.       |
+| `GET /v1/jobs`                  | List recent durable jobs.                    |
+| `GET /v1/jobs/:id`              | Read one durable job.                        |
+| `POST /v1/jobs/:id/cancel`      | Interrupt a job owned by this Drone process. |
+
+A bearer token is required for non-loopback binding. Tokenless loopback mode rejects requests with a
+browser `Origin` header. Jobs left active by a process restart are marked `interrupted`; they are
+never reconstructed from untrusted output.
+
+The HTTP server applies a 10-second header watchdog, a 65-second request watchdog, and bounded body
+reads. Unsupported encodings, invalid framing, and oversized or invalid bodies are rejected; a
+rejected body read disables keep-alive, drains only for a bounded one-second cleanup interval, and
+destroys an incomplete request rather than leaving its socket open. Artifact downloads buffer and
+send the bounded byte snapshot already verified through the content-store file handle; the response
+path does not reopen or stream from a content-store pathname.
+
+### Node.js client and public contracts
+
+Node.js consumers should use `@agentic-orch/drone-client`. The dependency-free package owns the
+public v1 HTTP request and response types, runtime decoders, secure base-URL policy, bearer
+authentication, timeouts, cancellation, redirect rejection, and bounded response reads. It enforces
+a hard deadline even when a transport ignores abort, requests identity encoding, rejects compressed
+responses, cancels rejected response bodies, and reconciles `Content-Length` exactly when the header
+is present. It also correlates artifact and job responses with the request, enforces public v1
+collection/resource/state invariants, and SHA-256-verifies downloaded artifact bytes against the
+requested artifact ID.
+
+Provider implementations, trusted operation definitions, stores, service lifecycle, and the HTTP
+server remain Drone internals and are not part of the client package. Drone defines and tests the
+server-side compatibility contract but does not depend on `@agentic-orch/drone-client`; consumers
+link that private module from the sibling checkout.
+
+Drone itself consumes `@agentic-orch/node-guardrails/process`, `/http`, and `/cas` for no-shell
+execution, bounded request handling, hardened JSON responses, and verified content-addressed file
+storage. Operation metadata, media validation, job/artifact semantics, provider policy, and
+authorization remain server-owned. The `workspace:*` `@agentic-orch/ts-quality` development
+dependency supplies the shared repository checks; native Swift validation remains Drone-specific.
+
+### Local module boundary
+
+Keep the wire contract in `drone-client`, neutral process/HTTP/CAS primitives in `node-guardrails`,
+and sandbox policy in Drone. Each consumer owns its lockfile and points to these siblings through
+`workspace:*`; no registry migration is planned.
+
+## Quality
+
+```bash
+pnpm check
+pnpm quality:offline
+pnpm native:check
+pnpm preflight
+```
+
+Unit and HTTP tests use a fake provider. They do not boot a VM, pull an image, execute a specimen,
+or consume model/API usage.
