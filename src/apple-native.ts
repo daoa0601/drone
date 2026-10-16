@@ -9,7 +9,7 @@ import {
   providerAttestationSummary,
   verifyAppleNativeAttestation,
 } from "./attestation.js";
-import { DRONE_PROTOCOL_VERSION } from "./domain.js";
+import { APPLE_NATIVE_PROVIDER_ID, DRONE_PROTOCOL_VERSION } from "./domain.js";
 import type {
   NativeDriverRequest,
   OperationOutput,
@@ -217,7 +217,7 @@ async function readOutputs(
 }
 
 export class AppleNativeProvider implements SandboxProvider {
-  readonly providerId = "apple_native" as const;
+  readonly providerId = APPLE_NATIVE_PROVIDER_ID;
   readonly #options: AppleNativeOptions;
 
   constructor(options: AppleNativeOptions) {
@@ -274,7 +274,7 @@ export class AppleNativeProvider implements SandboxProvider {
                   ? "attestation_missing_invalid_or_expired"
                   : "ready";
     return {
-      provider_id: "apple_native",
+      provider_id: APPLE_NATIVE_PROVIDER_ID,
       product: "Apple Containerization",
       installed,
       enabled,

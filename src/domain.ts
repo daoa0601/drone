@@ -1,40 +1,67 @@
-export const DRONE_PROTOCOL_VERSION = "1" as const;
-export const APPLE_NATIVE_ATTESTATION_PROFILE = "apple_native_no_network_vm_v1" as const;
+import type {
+  APPLE_NATIVE_ATTESTATION_PROFILE,
+  APPLE_NATIVE_PROVIDER_ID,
+  DroneArtifactMetadata,
+  DroneExecutionAttestation,
+  DroneJob,
+  DroneJobOutputArtifact,
+  DroneJobStatus,
+  DroneJobSubmission,
+  DroneOperationInputSlot,
+  DroneOperationOutput,
+  DroneOperationResources,
+  DroneProviderAttestationSummary,
+  DroneProviderStatus,
+  DronePublicOperation,
+} from "@agentic-orch/drone-client";
 
-export type ProviderId = "apple_native";
-export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "interrupted";
+// The public v1 wire contract lives in @agentic-orch/drone-client. These names keep the server's
+// vocabulary and narrow the provider to the one this server implements.
+export {
+  APPLE_NATIVE_ATTESTATION_PROFILE,
+  APPLE_NATIVE_PROVIDER_ID,
+  DRONE_PROTOCOL_VERSION,
+} from "@agentic-orch/drone-client";
+
+export type ProviderId = typeof APPLE_NATIVE_PROVIDER_ID;
+export type JobStatus = DroneJobStatus;
 export type ProviderAttestationProfile = typeof APPLE_NATIVE_ATTESTATION_PROFILE;
+export type ProviderAttestationSummary = DroneProviderAttestationSummary;
+export type ProviderExecutionAttestation = DroneExecutionAttestation;
+export type AppleNativeIsolationClaims = Omit<
+  DroneExecutionAttestation,
+  | "schema_version"
+  | "profile"
+  | "provider_attestation_id"
+  | "challenge"
+  | "container_id"
+  | "image_reference"
+>;
+export type OperationInputSlot = DroneOperationInputSlot;
+export type OperationOutput = DroneOperationOutput;
+export type OperationResources = DroneOperationResources;
+export type JobSubmission = DroneJobSubmission;
+export type ArtifactMetadata = DroneArtifactMetadata;
+export type JobOutputArtifact = DroneJobOutputArtifact;
 
-export interface ProviderAttestationSummary {
-  readonly attestation_id: string;
-  readonly profile: ProviderAttestationProfile;
-  readonly key_id: string;
-  readonly issuer: string;
-  readonly issued_at: string;
-  readonly expires_at: string;
+export interface PublicOperation extends DronePublicOperation {
+  readonly provider: ProviderId;
 }
 
-export interface AppleNativeIsolationClaims {
-  readonly backend: "apple_containerization";
-  readonly isolation: "lightweight_vm";
-  readonly guest_os: "linux";
-  readonly network_mode: "none";
-  readonly ephemeral_vm: true;
-  readonly read_only_root: true;
-  readonly input_disk_read_only: true;
-  readonly output_disk_bounded: true;
-  readonly host_directory_sharing: false;
-  readonly socket_sharing: false;
-  readonly nested_virtualization: false;
-  readonly non_root_required: true;
-  readonly no_new_privileges: true;
-  readonly capabilities: "none";
+export interface JobRecord extends DroneJob {
+  readonly provider_id: ProviderId;
 }
+
+export interface ProviderStatus extends DroneProviderStatus {
+  readonly provider_id: ProviderId;
+}
+
+// Server-only types: trusted configuration, signed attestation statements, and the native driver.
 
 export interface AppleNativeAttestationPayload {
   readonly schema_version: "1";
   readonly profile: ProviderAttestationProfile;
-  readonly provider_id: "apple_native";
+  readonly provider_id: ProviderId;
   readonly issuer: string;
   readonly issued_at: string;
   readonly expires_at: string;
@@ -54,41 +81,6 @@ export interface SignedProviderAttestation {
   readonly signature: string;
 }
 
-export interface ProviderExecutionAttestation extends AppleNativeIsolationClaims {
-  readonly schema_version: "1";
-  readonly profile: ProviderAttestationProfile;
-  readonly provider_attestation_id: string;
-  readonly challenge: string;
-  readonly container_id: string;
-  readonly image_reference: string;
-}
-
-export interface OperationInputSlot {
-  readonly name: string;
-  readonly required: boolean;
-  readonly max_bytes: number;
-  readonly media_types: ReadonlyArray<string>;
-}
-
-export interface OperationOutput {
-  readonly name: string;
-  readonly required: boolean;
-  readonly max_bytes: number;
-  readonly media_type: string;
-}
-
-export interface OperationResources {
-  readonly cpus: number;
-  readonly memory_mb: number;
-  readonly rootfs_mb: number;
-  readonly writable_mb: number;
-  readonly output_disk_mb: number;
-  readonly timeout_seconds: number;
-  readonly max_log_bytes: number;
-  readonly max_processes: number;
-  readonly max_open_files: number;
-}
-
 export interface OperationDefinition {
   readonly operation_id: string;
   readonly enabled: boolean;
@@ -103,74 +95,6 @@ export interface OperationDefinition {
   readonly inputs: ReadonlyArray<OperationInputSlot>;
   readonly outputs: ReadonlyArray<OperationOutput>;
   readonly resources: OperationResources;
-}
-
-export interface PublicOperation {
-  readonly operation_id: string;
-  readonly enabled: boolean;
-  readonly provider: ProviderId;
-  readonly architecture: "arm64" | "amd64";
-  readonly network: "none";
-  readonly inputs: ReadonlyArray<OperationInputSlot>;
-  readonly outputs: ReadonlyArray<OperationOutput>;
-  readonly resources: OperationResources;
-}
-
-export interface JobSubmission {
-  readonly schema_version: "1";
-  readonly operation_id: string;
-  readonly provider_attestation_id: string;
-  readonly inputs: Readonly<Record<string, string>>;
-}
-
-export interface ArtifactMetadata {
-  readonly schema_version: "1";
-  readonly artifact_id: string;
-  readonly sha256: string;
-  readonly size_bytes: number;
-  readonly media_type: string;
-  readonly created_at: string;
-}
-
-export interface JobOutputArtifact {
-  readonly name: string;
-  readonly artifact_id: string;
-  readonly size_bytes: number;
-  readonly media_type: string;
-}
-
-export interface JobRecord {
-  readonly schema_version: "1";
-  readonly job_id: string;
-  readonly operation_id: string;
-  readonly provider_id: ProviderId;
-  readonly provider_attestation_id: string;
-  readonly status: JobStatus;
-  readonly inputs: Readonly<Record<string, string>>;
-  readonly outputs: ReadonlyArray<JobOutputArtifact>;
-  readonly submitted_at: string;
-  readonly started_at?: string;
-  readonly finished_at?: string;
-  readonly exit_code?: number;
-  readonly timed_out?: boolean;
-  readonly stdout_artifact_id?: string;
-  readonly stderr_artifact_id?: string;
-  readonly execution_attestation_artifact_id?: string;
-  readonly error_code?: string;
-}
-
-export interface ProviderStatus {
-  readonly provider_id: ProviderId;
-  readonly product: string;
-  readonly installed: boolean;
-  readonly enabled: boolean;
-  readonly mutations_available: boolean;
-  readonly attested: boolean;
-  readonly attestation?: ProviderAttestationSummary;
-  readonly reason: string;
-  readonly isolation: "lightweight_vm";
-  readonly guest_os: ReadonlyArray<"linux">;
-  readonly network_modes: ReadonlyArray<"none">;
 }
 
 export interface ResolvedInputArtifact {

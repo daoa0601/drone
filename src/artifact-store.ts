@@ -12,11 +12,11 @@ import {
   type VerifiedContent,
 } from "@agentic-orch/node-guardrails/cas";
 
+import { isDroneArtifactId, isDroneMediaType } from "@agentic-orch/drone-client";
+
 import type { ArtifactMetadata } from "./domain.js";
-import { isArtifactId } from "./contracts.js";
 import { DroneError, invalidInput } from "./errors.js";
 
-const MEDIA_TYPE = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$/iu;
 const MAX_METADATA_BYTES = 4 * 1024;
 
 interface DirectoryIdentity {
@@ -38,7 +38,7 @@ function nodeCode(error: unknown): string | undefined {
 
 function normalizedMediaType(value: string): string {
   const normalized = value.split(";", 1)[0]?.trim().toLowerCase() ?? "";
-  if (!MEDIA_TYPE.test(normalized)) throw invalidInput("Artifact media type is invalid.");
+  if (!isDroneMediaType(normalized)) throw invalidInput("Artifact media type is invalid.");
   return normalized;
 }
 
@@ -270,7 +270,7 @@ export class ArtifactStore {
       metadata.sha256 !== sha256 ||
       metadata.size_bytes !== content.size ||
       typeof metadata.media_type !== "string" ||
-      !MEDIA_TYPE.test(metadata.media_type) ||
+      !isDroneMediaType(metadata.media_type) ||
       typeof metadata.created_at !== "string"
     ) {
       throw artifactInvalid("Artifact metadata is inconsistent.");
@@ -279,7 +279,7 @@ export class ArtifactStore {
   }
 
   #digest(artifactId: string): string {
-    if (!isArtifactId(artifactId)) throw invalidInput("Artifact ID is invalid.");
+    if (!isDroneArtifactId(artifactId)) throw invalidInput("Artifact ID is invalid.");
     return artifactId.slice("sha256_".length);
   }
 

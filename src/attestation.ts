@@ -9,6 +9,14 @@ import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import path from "node:path";
 
+import {
+  APPLE_NATIVE_PROVIDER_ID,
+  isDroneAttestationChallenge,
+  isDroneAttestationId,
+  isDroneAttestationKeyId,
+  isDroneContainerId,
+  isDroneImageReference,
+} from "@agentic-orch/drone-client";
 import { Effect } from "effect";
 
 import {
@@ -22,12 +30,6 @@ import {
 import { runProcess } from "./process.js";
 
 const SHA256 = /^[a-f0-9]{64}$/u;
-const ATTESTATION_ID = /^attestation\.sha256\.[a-f0-9]{64}$/u;
-const KEY_ID = /^ed25519\.sha256\.[a-f0-9]{64}$/u;
-const CHALLENGE = /^[a-f0-9]{64}$/u;
-const CONTAINER_ID = /^drone-[a-f0-9]{24}$/u;
-const IMAGE_DIGEST =
-  /^(?:[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?\/)?[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[a-f0-9]{64}$/u;
 const MAX_ATTESTATION_BYTES = 64 * 1024;
 const MAX_PUBLIC_KEY_BYTES = 16 * 1024;
 const MAX_ATTESTATION_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
@@ -271,7 +273,7 @@ export function decodeAppleNativeAttestationPayload(
   if (
     payload.schema_version !== "1" ||
     payload.profile !== APPLE_NATIVE_ATTESTATION_PROFILE ||
-    payload.provider_id !== "apple_native"
+    payload.provider_id !== APPLE_NATIVE_PROVIDER_ID
   ) {
     throw new Error("Attestation payload identity is invalid.");
   }
@@ -289,7 +291,7 @@ export function decodeAppleNativeAttestationPayload(
   const decoded: AppleNativeAttestationPayload = {
     schema_version: "1",
     profile: APPLE_NATIVE_ATTESTATION_PROFILE,
-    provider_id: "apple_native",
+    provider_id: APPLE_NATIVE_PROVIDER_ID,
     issuer: boundedString(payload.issuer, "attestation issuer", 128),
     issued_at: canonicalTimestamp(payload.issued_at, "attestation issued_at"),
     expires_at: canonicalTimestamp(payload.expires_at, "attestation expires_at"),
@@ -336,12 +338,13 @@ export function decodeSignedProviderAttestation(
     signature: boundedString(envelope.signature, "attestation signature", 256),
   };
   if (
-    !ATTESTATION_ID.test(decoded.attestation_id) ||
+    !isDroneAttestationId(decoded.attestation_id) ||
     decoded.attestation_id !== attestationId(payload)
   ) {
     throw new Error("Provider attestation ID is invalid.");
   }
-  if (!KEY_ID.test(decoded.key_id)) throw new Error("Provider attestation key ID is invalid.");
+  if (!isDroneAttestationKeyId(decoded.key_id))
+    throw new Error("Provider attestation key ID is invalid.");
   const signature = Buffer.from(decoded.signature, "base64");
   if (signature.byteLength !== 64 || signature.toString("base64") !== decoded.signature) {
     throw new Error("Provider attestation signature encoding is invalid.");
@@ -396,7 +399,7 @@ export async function createAppleNativeAttestationPayload(options: {
     {
       schema_version: "1",
       profile: APPLE_NATIVE_ATTESTATION_PROFILE,
-      provider_id: "apple_native",
+      provider_id: APPLE_NATIVE_PROVIDER_ID,
       issuer: options.issuer,
       issued_at: options.issuedAt.toISOString(),
       expires_at: options.expiresAt.toISOString(),
@@ -523,13 +526,13 @@ export function decodeProviderExecutionAttestation(
     attestation.schema_version !== "1" ||
     attestation.profile !== APPLE_NATIVE_ATTESTATION_PROFILE ||
     typeof attestation.provider_attestation_id !== "string" ||
-    !ATTESTATION_ID.test(attestation.provider_attestation_id) ||
+    !isDroneAttestationId(attestation.provider_attestation_id) ||
     typeof attestation.challenge !== "string" ||
-    !CHALLENGE.test(attestation.challenge) ||
+    !isDroneAttestationChallenge(attestation.challenge) ||
     typeof attestation.container_id !== "string" ||
-    !CONTAINER_ID.test(attestation.container_id) ||
+    !isDroneContainerId(attestation.container_id) ||
     typeof attestation.image_reference !== "string" ||
-    !IMAGE_DIGEST.test(attestation.image_reference)
+    !isDroneImageReference(attestation.image_reference)
   ) {
     throw new Error("Execution attestation identity is invalid.");
   }

@@ -16,15 +16,6 @@
   "exports": {
     ".": "./dist/index.js"
   },
-  "files": [
-    "dist",
-    "native/apple-containerization/Package.swift",
-    "native/apple-containerization/Sources",
-    "README.md",
-    "QUALITY.md",
-    "LICENSE",
-    "scripts/quality/require-pnpm.mjs"
-  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "check": "pnpm quality:quick && pnpm test",
@@ -41,11 +32,9 @@
     "native:build": "node scripts/build-native.mjs",
     "native:check": "pnpm native:format:check && swift test --package-path native/apple-containerization --jobs 4",
     "native:format:check": "swift format lint --recursive --strict native/apple-containerization/Sources native/apple-containerization/Tests native/apple-containerization/Package.swift",
-    "pack:check": "ts-quality pack",
     "preflight": "pnpm quality",
-    "preinstall": "node scripts/quality/require-pnpm.mjs",
     "quality": "pnpm quality:offline && pnpm deps:check",
-    "quality:offline": "pnpm quality:quick && pnpm test:coverage && pnpm build && pnpm pack:check",
+    "quality:offline": "pnpm quality:quick && pnpm test:coverage && pnpm build",
     "quality:quick": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm secrets:scan",
     "secrets:scan": "ts-quality secrets",
     "start": "node --env-file-if-exists=.env --enable-source-maps dist/cli.js serve",
@@ -54,6 +43,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@agentic-orch/drone-client": "workspace:*",
     "@agentic-orch/node-guardrails": "workspace:*",
     "effect": "4.0.0-beta.98"
   },
@@ -65,13 +55,5 @@
     "prettier": "3.9.5",
     "typescript": "6.0.3",
     "vitest": "4.1.10"
-  },
-  "tsQuality": {
-    "pack": {
-      "forbiddenPrefixes": [
-        "native/apple-containerization/.build/",
-        "native/apple-containerization/Tests/"
-      ]
-    }
   }
 }

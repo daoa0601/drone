@@ -1,7 +1,7 @@
 # Drone
 
-Drone is a reusable local sandbox deployment service. It gives Templar and other applications one
-small API for staging artifacts and running operator-defined operations in disposable environments.
+Drone is a reusable local sandbox deployment service. It gives local applications one small API for
+staging artifacts and running operator-defined operations in disposable environments.
 
 The first executable backend uses Apple Containerization directly. Every job receives a separate
 Virtualization.framework Linux VM. The backend creates no network interface, exposes no host
@@ -21,7 +21,7 @@ architecture, user, or networking mode. Those live in the local operation regist
 Drone operator.
 
 ```text
-Templar or another local client
+Local client
   -> Drone HTTP API
        -> artifact and job stores
        -> trusted operation registry
@@ -46,7 +46,8 @@ Requirements:
 - Apple silicon and macOS 26 or later for the native backend;
 - Swift 6.2/Xcode 26 for building the worker;
 - Node.js and pnpm versions declared in `package.json`;
-- sibling checkouts at `../node-guardrails` and `../ts-quality` for the current frozen install.
+- `drone-client`, `node-guardrails`, and `ts-quality` checked out next to this repository (see the
+  catalog README for the sibling layout).
 
 ```bash
 pnpm install --frozen-lockfile
@@ -54,10 +55,9 @@ pnpm check
 pnpm native:build
 ```
 
-`package.json` uses `workspace:*` for `@agentic-orch/node-guardrails` and
-`@agentic-orch/ts-quality`. The current lock resolves both as sibling `link:` entries, so
-`pnpm install --frozen-lockfile` requires both directories above and cannot silently fall back to a
-registry package.
+The lock resolves the three `workspace:*` siblings as `link:` entries, so a missing sibling is an
+installation error rather than a registry fallback. `pnpm install` builds `drone-client` and
+`node-guardrails` through their `prepare` scripts.
 
 The service starts safely with no enabled operation and with the native provider disabled:
 
@@ -236,33 +236,19 @@ destroys an incomplete request rather than leaving its socket open. Artifact dow
 send the bounded byte snapshot already verified through the content-store file handle; the response
 path does not reopen or stream from a content-store pathname.
 
-### Node.js client and public contracts
+### Wire contract
 
-Node.js consumers should use `@agentic-orch/drone-client`. The dependency-free package owns the
-public v1 HTTP request and response types, runtime decoders, secure base-URL policy, bearer
-authentication, timeouts, cancellation, redirect rejection, and bounded response reads. It enforces
-a hard deadline even when a transport ignores abort, requests identity encoding, rejects compressed
-responses, cancels rejected response bodies, and reconciles `Content-Length` exactly when the header
-is present. It also correlates artifact and job responses with the request, enforces public v1
-collection/resource/state invariants, and SHA-256-verifies downloaded artifact bytes against the
-requested artifact ID.
+The public v1 request and response types, protocol and profile constants, limits, and identifier
+syntax are defined once in `@agentic-orch/drone-client`, which Drone imports. Drone's server-side
+admission decoders build on those definitions but stay stricter than the tolerant client decoders:
+they reject unknown fields and map failures to Drone's own error codes. Node.js consumers should use
+`@agentic-orch/drone-client` as the HTTP client; see its README for the client behavior.
 
 Provider implementations, trusted operation definitions, stores, service lifecycle, and the HTTP
-server remain Drone internals and are not part of the client package. Drone defines and tests the
-server-side compatibility contract but does not depend on `@agentic-orch/drone-client`; consumers
-link that private module from the sibling checkout.
-
-Drone itself consumes `@agentic-orch/node-guardrails/process`, `/http`, and `/cas` for no-shell
-execution, bounded request handling, hardened JSON responses, and verified content-addressed file
-storage. Operation metadata, media validation, job/artifact semantics, provider policy, and
-authorization remain server-owned. The `workspace:*` `@agentic-orch/ts-quality` development
-dependency supplies the shared repository checks; native Swift validation remains Drone-specific.
-
-### Local module boundary
-
-Keep the wire contract in `drone-client`, neutral process/HTTP/CAS primitives in `node-guardrails`,
-and sandbox policy in Drone. Each consumer owns its lockfile and points to these siblings through
-`workspace:*`; no registry migration is planned.
+server remain Drone internals. Drone also uses `@agentic-orch/node-guardrails/process`, `/http`, and
+`/cas` for no-shell execution, bounded request handling, hardened JSON responses, and verified
+content-addressed file storage. Operation metadata, media validation, job/artifact semantics,
+provider policy, and authorization remain server-owned.
 
 ## Quality
 
