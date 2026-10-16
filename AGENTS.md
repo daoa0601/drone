@@ -30,7 +30,7 @@ one Apple Virtualization-backed Linux VM per job.
   empty Linux capability sets, and `no_new_privileges`.
 - Do not expose raw provider errors through the API.
 - Tests use fake providers and never execute a real specimen or pull an image.
-- Run `pnpm preflight` and `pnpm native:check` before release.
+- Run `pnpm preflight` and `pnpm native:check` before handing off a change.
 
 ## Testing
 

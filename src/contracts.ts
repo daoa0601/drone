@@ -1,3 +1,13 @@
+import {
+  APPLE_NATIVE_PROVIDER_ID,
+  DRONE_V1_LIMITS,
+  isDroneArtifactId,
+  isDroneAttestationId,
+  isDroneImageReference,
+  isDroneMediaType,
+  isDroneOperationId,
+  isDroneSlotName,
+} from "@agentic-orch/drone-client";
 import { Schema, SchemaParser } from "effect";
 
 import type {
@@ -38,7 +48,7 @@ const ResourcesSchema = Schema.Struct({
 const OperationSchema = Schema.Struct({
   operation_id: Schema.String,
   enabled: Schema.Boolean,
-  provider: Schema.Literal("apple_native"),
+  provider: Schema.Literal(APPLE_NATIVE_PROVIDER_ID),
   image: Schema.String,
   command: Schema.Array(Schema.String),
   environment: Schema.Record(Schema.String, Schema.String),
@@ -72,25 +82,18 @@ const decodeJobShape = SchemaParser.decodeUnknownSync(JobSubmissionSchema, {
   onExcessProperty: "error",
 });
 
-const SAFE_ID = /^[a-z][a-z0-9_.-]{0,127}$/u;
-const SAFE_SLOT = /^[a-z][a-z0-9_-]{0,63}$/u;
-const ARTIFACT_ID = /^sha256_[a-f0-9]{64}$/u;
-const ATTESTATION_ID = /^attestation\.sha256\.[a-f0-9]{64}$/u;
-const IMAGE_DIGEST =
-  /^(?:[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?\/)?[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[a-f0-9]{64}$/u;
-const MEDIA_TYPE = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$/iu;
 const ENV_NAME = /^[A-Z_][A-Z0-9_]{0,63}$/u;
 const MIB = 1024 * 1024;
 
 function safeId(value: string, label: string): string {
   const normalized = value.trim();
-  if (!SAFE_ID.test(normalized)) throw invalidInput(`${label} is invalid.`);
+  if (!isDroneOperationId(normalized)) throw invalidInput(`${label} is invalid.`);
   return normalized;
 }
 
 function safeSlot(value: string, label: string): string {
   const normalized = value.trim();
-  if (!SAFE_SLOT.test(normalized)) throw invalidInput(`${label} is invalid.`);
+  if (!isDroneSlotName(normalized)) throw invalidInput(`${label} is invalid.`);
   return normalized;
 }
 
@@ -103,7 +106,7 @@ function integer(value: number, minimum: number, maximum: number, label: string)
 
 function mediaType(value: string, label: string): string {
   const normalized = value.trim().toLowerCase();
-  if (!MEDIA_TYPE.test(normalized)) throw invalidInput(`${label} is invalid.`);
+  if (!isDroneMediaType(normalized)) throw invalidInput(`${label} is invalid.`);
   return normalized;
 }
 
@@ -111,15 +114,22 @@ function normalizeInputs(
   values: ReadonlyArray<typeof InputSlotSchema.Type>,
   operationIndex: number,
 ): ReadonlyArray<OperationInputSlot> {
-  if (values.length > 16) throw invalidInput(`operations[${operationIndex}].inputs exceeds 16.`);
+  if (values.length > DRONE_V1_LIMITS.maxSlots) {
+    throw invalidInput(`operations[${operationIndex}].inputs exceeds ${DRONE_V1_LIMITS.maxSlots}.`);
+  }
   const names = new Set<string>();
   return values.map((input, index) => {
     const prefix = `operations[${operationIndex}].inputs[${index}]`;
     const name = safeSlot(input.name, `${prefix}.name`);
     if (names.has(name)) throw invalidInput(`${prefix}.name is duplicated.`);
     names.add(name);
-    if (input.media_types.length === 0 || input.media_types.length > 16) {
-      throw invalidInput(`${prefix}.media_types must contain 1-16 values.`);
+    if (
+      input.media_types.length === 0 ||
+      input.media_types.length > DRONE_V1_LIMITS.maxMediaTypesPerInput
+    ) {
+      throw invalidInput(
+        `${prefix}.media_types must contain 1-${DRONE_V1_LIMITS.maxMediaTypesPerInput} values.`,
+      );
     }
     const mediaTypes = input.media_types.map((value, mediaIndex) =>
       mediaType(value, `${prefix}.media_types[${mediaIndex}]`),
@@ -130,7 +140,12 @@ function normalizeInputs(
     return {
       name,
       required: input.required,
-      max_bytes: integer(input.max_bytes, 1, 1024 * MIB, `${prefix}.max_bytes`),
+      max_bytes: integer(
+        input.max_bytes,
+        1,
+        DRONE_V1_LIMITS.maxArtifactBytes,
+        `${prefix}.max_bytes`,
+      ),
       media_types: mediaTypes,
     };
   });
@@ -140,7 +155,11 @@ function normalizeOutputs(
   values: ReadonlyArray<typeof OutputSchema.Type>,
   operationIndex: number,
 ): ReadonlyArray<OperationOutput> {
-  if (values.length > 16) throw invalidInput(`operations[${operationIndex}].outputs exceeds 16.`);
+  if (values.length > DRONE_V1_LIMITS.maxSlots) {
+    throw invalidInput(
+      `operations[${operationIndex}].outputs exceeds ${DRONE_V1_LIMITS.maxSlots}.`,
+    );
+  }
   const names = new Set<string>();
   return values.map((output, index) => {
     const prefix = `operations[${operationIndex}].outputs[${index}]`;
@@ -150,7 +169,12 @@ function normalizeOutputs(
     return {
       name,
       required: output.required,
-      max_bytes: integer(output.max_bytes, 1, 256 * MIB, `${prefix}.max_bytes`),
+      max_bytes: integer(
+        output.max_bytes,
+        1,
+        DRONE_V1_LIMITS.maxOperationOutputBytes,
+        `${prefix}.max_bytes`,
+      ),
       media_type: mediaType(output.media_type, `${prefix}.media_type`),
     };
   });
@@ -161,16 +185,57 @@ function normalizeResources(
   operationIndex: number,
 ): OperationResources {
   const prefix = `operations[${operationIndex}].resources`;
+  const limits = DRONE_V1_LIMITS;
   return {
-    cpus: integer(value.cpus, 1, 16, `${prefix}.cpus`),
-    memory_mb: integer(value.memory_mb, 128, 65_536, `${prefix}.memory_mb`),
-    rootfs_mb: integer(value.rootfs_mb, 128, 65_536, `${prefix}.rootfs_mb`),
-    writable_mb: integer(value.writable_mb, 16, 16_384, `${prefix}.writable_mb`),
-    output_disk_mb: integer(value.output_disk_mb, 16, 4096, `${prefix}.output_disk_mb`),
-    timeout_seconds: integer(value.timeout_seconds, 1, 3600, `${prefix}.timeout_seconds`),
-    max_log_bytes: integer(value.max_log_bytes, 1024, 1024 * 1024, `${prefix}.max_log_bytes`),
-    max_processes: integer(value.max_processes, 1, 1024, `${prefix}.max_processes`),
-    max_open_files: integer(value.max_open_files, 16, 4096, `${prefix}.max_open_files`),
+    cpus: integer(value.cpus, limits.minCpus, limits.maxCpus, `${prefix}.cpus`),
+    memory_mb: integer(
+      value.memory_mb,
+      limits.minMemoryMb,
+      limits.maxMemoryMb,
+      `${prefix}.memory_mb`,
+    ),
+    rootfs_mb: integer(
+      value.rootfs_mb,
+      limits.minRootfsMb,
+      limits.maxRootfsMb,
+      `${prefix}.rootfs_mb`,
+    ),
+    writable_mb: integer(
+      value.writable_mb,
+      limits.minWritableMb,
+      limits.maxWritableMb,
+      `${prefix}.writable_mb`,
+    ),
+    output_disk_mb: integer(
+      value.output_disk_mb,
+      limits.minOutputDiskMb,
+      limits.maxOutputDiskMb,
+      `${prefix}.output_disk_mb`,
+    ),
+    timeout_seconds: integer(
+      value.timeout_seconds,
+      limits.minTimeoutSeconds,
+      limits.maxTimeoutSeconds,
+      `${prefix}.timeout_seconds`,
+    ),
+    max_log_bytes: integer(
+      value.max_log_bytes,
+      limits.minLogBytes,
+      limits.maxLogBytes,
+      `${prefix}.max_log_bytes`,
+    ),
+    max_processes: integer(
+      value.max_processes,
+      limits.minProcesses,
+      limits.maxProcesses,
+      `${prefix}.max_processes`,
+    ),
+    max_open_files: integer(
+      value.max_open_files,
+      limits.minOpenFiles,
+      limits.maxOpenFiles,
+      `${prefix}.max_open_files`,
+    ),
   };
 }
 
@@ -216,15 +281,16 @@ export function decodeOperationRegistry(value: unknown): ReadonlyArray<Operation
   } catch (cause) {
     throw invalidInput("Operation registry does not match the strict v1 schema.", cause);
   }
-  if (registry.operations.length > 128)
-    throw invalidInput("Operation registry exceeds 128 entries.");
+  if (registry.operations.length > DRONE_V1_LIMITS.maxOperations) {
+    throw invalidInput(`Operation registry exceeds ${DRONE_V1_LIMITS.maxOperations} entries.`);
+  }
   const operationIds = new Set<string>();
   return registry.operations.map((operation, index) => {
     const operationId = safeId(operation.operation_id, `operations[${index}].operation_id`);
     if (operationIds.has(operationId))
       throw invalidInput(`Duplicate operation_id: ${operationId}.`);
     operationIds.add(operationId);
-    if (!IMAGE_DIGEST.test(operation.image)) {
+    if (!isDroneImageReference(operation.image)) {
       throw invalidInput(`operations[${index}].image must be an exact sha256 OCI reference.`);
     }
     const inputs = normalizeInputs(operation.inputs, index);
@@ -237,7 +303,7 @@ export function decodeOperationRegistry(value: unknown): ReadonlyArray<Operation
     return {
       operation_id: operationId,
       enabled: operation.enabled,
-      provider: "apple_native",
+      provider: APPLE_NATIVE_PROVIDER_ID,
       image: operation.image,
       command: command(operation.command, index),
       environment: environment(operation.environment, index),
@@ -260,17 +326,19 @@ export function decodeJobSubmission(value: unknown): JobSubmission {
     throw invalidInput("Job submission does not match the strict v1 schema.", cause);
   }
   const entries = Object.entries(input.inputs);
-  if (entries.length > 16) throw invalidInput("inputs exceeds 16 entries.");
+  if (entries.length > DRONE_V1_LIMITS.maxSlots) {
+    throw invalidInput(`inputs exceeds ${DRONE_V1_LIMITS.maxSlots} entries.`);
+  }
   const inputs = Object.fromEntries(
     entries.map(([slot, artifactId]) => {
       const normalizedSlot = safeSlot(slot, "inputs key");
-      if (!ARTIFACT_ID.test(artifactId)) {
+      if (!isDroneArtifactId(artifactId)) {
         throw invalidInput(`inputs.${normalizedSlot} is not a content-addressed artifact ID.`);
       }
       return [normalizedSlot, artifactId] as const;
     }),
   );
-  if (!ATTESTATION_ID.test(input.provider_attestation_id)) {
+  if (!isDroneAttestationId(input.provider_attestation_id)) {
     throw invalidInput("provider_attestation_id is invalid.");
   }
   return {
@@ -279,8 +347,4 @@ export function decodeJobSubmission(value: unknown): JobSubmission {
     provider_attestation_id: input.provider_attestation_id,
     inputs,
   };
-}
-
-export function isArtifactId(value: string): boolean {
-  return ARTIFACT_ID.test(value);
 }

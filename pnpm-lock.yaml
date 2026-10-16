@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@agentic-orch/drone-client':
+        specifier: workspace:*
+        version: link:../drone-client
       '@agentic-orch/node-guardrails':
         specifier: workspace:*
         version: link:../node-guardrails

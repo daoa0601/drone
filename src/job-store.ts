@@ -2,14 +2,18 @@ import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import {
+  APPLE_NATIVE_PROVIDER_ID,
+  isDroneArtifactId,
+  isDroneAttestationId,
+  isDroneJobId,
+} from "@agentic-orch/drone-client";
+
 import type { JobRecord, JobStatus, ProviderId } from "./domain.js";
 import { DroneError, invalidInput } from "./errors.js";
 
-const JOB_ID = /^job_[a-f0-9]{32}$/u;
-const ATTESTATION_ID = /^attestation\.sha256\.[a-f0-9]{64}$/u;
-const ARTIFACT_ID = /^sha256_[a-f0-9]{64}$/u;
 const TERMINAL = new Set<JobStatus>(["succeeded", "failed", "cancelled", "interrupted"]);
-const PROVIDERS = new Set<ProviderId>(["apple_native"]);
+const PROVIDERS = new Set<ProviderId>([APPLE_NATIVE_PROVIDER_ID]);
 
 function persistedJob(value: unknown): JobRecord {
   if (typeof value !== "object" || value === null) throw new Error("job must be an object");
@@ -17,12 +21,12 @@ function persistedJob(value: unknown): JobRecord {
   if (
     job.schema_version !== "1" ||
     typeof job.job_id !== "string" ||
-    !JOB_ID.test(job.job_id) ||
+    !isDroneJobId(job.job_id) ||
     typeof job.operation_id !== "string" ||
     typeof job.provider_id !== "string" ||
     !PROVIDERS.has(job.provider_id as ProviderId) ||
     typeof job.provider_attestation_id !== "string" ||
-    !ATTESTATION_ID.test(job.provider_attestation_id) ||
+    !isDroneAttestationId(job.provider_attestation_id) ||
     typeof job.status !== "string" ||
     !["queued", "running", "succeeded", "failed", "cancelled", "interrupted"].includes(
       job.status,
@@ -33,7 +37,7 @@ function persistedJob(value: unknown): JobRecord {
     typeof job.submitted_at !== "string" ||
     (job.execution_attestation_artifact_id !== undefined &&
       (typeof job.execution_attestation_artifact_id !== "string" ||
-        !ARTIFACT_ID.test(job.execution_attestation_artifact_id)))
+        !isDroneArtifactId(job.execution_attestation_artifact_id)))
   ) {
     throw new Error("job record is invalid");
   }
@@ -45,7 +49,7 @@ export function createJobId(): string {
 }
 
 export function assertJobId(value: string): string {
-  if (!JOB_ID.test(value)) throw invalidInput("Job ID is invalid.");
+  if (!isDroneJobId(value)) throw invalidInput("Job ID is invalid.");
   return value;
 }
 
@@ -136,7 +140,7 @@ export class JobStore {
     const entries = await readdir(this.#root, { withFileTypes: true }).catch(() => []);
     const jobs: Array<JobRecord> = [];
     for (const entry of entries) {
-      if (!entry.isDirectory() || !JOB_ID.test(entry.name)) continue;
+      if (!entry.isDirectory() || !isDroneJobId(entry.name)) continue;
       try {
         jobs.push(await this.get(entry.name));
       } catch {
